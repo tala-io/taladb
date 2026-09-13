@@ -104,9 +104,50 @@ batch sizes across low-memory phones and desktop workloads.
 
 The [v0.9.x scan rewrite](#faster-flat-vector-search-shipped-in-v0-9-x) already skips *scoring* filtered-out vectors, but the pre-filter itself still runs `find()`, which materialises every matching document — embedding arrays included — just to collect their ids. An id-only execution path in the query executor (return ids without decoding document bodies) would cut the filter cost, especially for low-selectivity filters over large documents.
 
-### HNSW on web and React Native
+### Graph traversal cost — approximate search still loses to the exact scan
 
-The `vector-hnsw` feature ships in `@taladb/node` since v0.8.3 but not in the WASM or JSI builds. Evaluate enabling it per platform: WASM bundle size, mobile memory ceilings, and graph build time on phone CPUs all need numbers first.
+Persistent HNSW shipped in v0.11.4 and v0.11.5 made construction faster and
+recall better. Two gaps remain, both open, both reproducible with
+`cargo run --release -p taladb-core --example hnsw_profile <count> [spread]`.
+
+**Approximate search is slower than exact at small-to-mid corpus sizes.** At
+10,000 vectors of 384 dimensions, exact search runs 3.2 ms/query while ANN at
+`efSearch` 100 runs 8.5 ms — despite computing roughly a third as many
+distances. The cause is structural rather than algorithmic: every traversal step
+is a random point read that postcard-decodes an entire graph node, vector
+included, whereas the exact path decodes the vector table once into a
+generation-keyed cache and then scans it sequentially with no per-vector
+allocation.
+
+Two candidate fixes, neither attempted yet:
+
+- Give the graph path an equivalent cross-query cache, keyed by table and graph
+  revision. This is parity with the exact path rather than a new idea, but it
+  needs careful invalidation — a stale graph node returns wrong results, which
+  is far worse than a slow query.
+- Split the node record so links and vectors are separate keys. Traversal scores
+  many more nodes than it expands, and a node's vector is ~1.5 KB against a few
+  hundred bytes of links. With `Quantization::None` the vector is already stored
+  in the vector table, so the graph copy is redundant. This shrinks graph nodes
+  by roughly an order of magnitude but is a storage-format change and forces a
+  rebuild.
+
+**Recall degrades with corpus size faster than it should.** After the v0.11.5
+fixes, recall@10 at `efSearch` 100 is 97.5% at 2,000 vectors but 65% at 10,000;
+a reference implementation stays near 95% at both. Part of this is the synthetic
+generator — recall moves with cluster spread (80.5% at 0.2, 75.5% at 0.4 on
+5,000 vectors), and widely-spread points in 384 dimensions approach
+uniform-on-sphere, the pathological case for any proximity graph. But not all of
+it: the graph examines ~48% of a 5,000-vector collection to reach 80% recall,
+which is inefficient for `M=16`, `efConstruction=200`.
+
+Ruled out already: the layer-0 link budget (fixed — it used `M` where the
+algorithm specifies `M_max0 = 2M`), single-entry-point layer descent (fixed to
+carry the whole result set, worth ~0.5pp), and the level-assignment
+distribution, which is a correct geometric `1/M`. The next things to examine are
+the neighbour-selection heuristic's pruned-connection handling and whether
+measuring against a real embedding set rather than a synthetic one changes the
+picture.
 
 ### Continuous benchmarks
 

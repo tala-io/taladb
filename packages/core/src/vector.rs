@@ -236,6 +236,56 @@ pub fn dot_similarity(a: &[f32], b: &[f32]) -> f32 {
     total
 }
 
+/// The norm half of [`dot_and_norm_sq`], on its own.
+///
+/// Lane-for-lane identical to the fused version — same accumulator count, same
+/// summation order — so a norm computed once and cached is *bit-equal* to one
+/// recomputed inside the fused loop. That matters more than it sounds: scores
+/// order the result set, and a norm that differs in the last ulp can swap two
+/// near-tied neighbours and move a document in or out of top-k.
+#[inline]
+pub fn norm_sq(v: &[f32]) -> f32 {
+    let mut acc = [0.0f32; LANES];
+    let (lanes, rest) = v.as_chunks::<LANES>();
+    for s in lanes {
+        for i in 0..LANES {
+            acc[i] += s[i] * s[i];
+        }
+    }
+    let mut total: f32 = acc.iter().sum();
+    for s in rest {
+        total += s * s;
+    }
+    total
+}
+
+/// [`score_with_query_norm`] with the *stored* vector's squared norm also known.
+///
+/// Cosine is the only metric that needs it, and it is a property of the stored
+/// vector alone — invariant across every query it will ever be compared to. The
+/// graph traversal scores the same cached nodes repeatedly, so recomputing it
+/// per comparison was a full extra pass over the vector each time.
+#[inline]
+pub fn score_with_norms(
+    metric: &VectorMetric,
+    query: &[f32],
+    query_norm: f32,
+    stored: &[f32],
+    stored_norm_sq: f32,
+) -> f32 {
+    match metric {
+        VectorMetric::Cosine => {
+            let norm_b = stored_norm_sq.sqrt();
+            if query_norm == 0.0 || norm_b == 0.0 {
+                0.0
+            } else {
+                dot_similarity(query, stored) / (query_norm * norm_b)
+            }
+        }
+        _ => score_with_query_norm(metric, query, query_norm, stored),
+    }
+}
+
 /// Converts Euclidean distance to a similarity score in `(0, 1]`.
 /// Identical vectors → 1.0; the further apart, the closer to 0.
 pub fn euclidean_similarity(a: &[f32], b: &[f32]) -> f32 {
