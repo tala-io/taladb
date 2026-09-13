@@ -574,17 +574,27 @@ pub(crate) fn insert(
             for layer in ((level + 1)..=h.level).rev() {
                 entry = reader.greedy(&query, entry, layer)?;
             }
+            // Algorithm 1 carries the *whole* result set from each layer down as
+            // the entry points for the next one. This used to keep only the
+            // single nearest candidate, which restarts every layer's search from
+            // one point and explores a correspondingly narrower neighbourhood —
+            // the new node then links to whatever that narrow search happened to
+            // find. `layer` already takes a slice, so the fix is to stop
+            // throwing the rest away.
+            let mut entries = vec![entry];
             for layer in (0..=level.min(h.level)).rev() {
                 let candidates = reader.layer(
                     &query,
-                    &[entry],
+                    &entries,
                     layer,
                     h.options.ef_construction as usize,
                     None,
                     false,
                 )?;
-                if let Some(best) = candidates.first() {
-                    entry = best.1;
+                // An empty result would leave the next layer with nowhere to
+                // start, so hold the previous entry set in that case.
+                if !candidates.is_empty() {
+                    entries = candidates.iter().map(|hit| hit.1).collect();
                 }
                 // Layer 0 takes twice the connections, like every other layer's
                 // pruning limit a few lines down already assumes (`M_max0` in
@@ -657,12 +667,21 @@ pub(crate) fn insert(
     Ok(())
 }
 
+/// Search the graph, reusing `cache` across calls.
+///
+/// The caller owns the cache because the ANN path retries with a doubled
+/// `efSearch` when a filter leaves too few rows, and each retry walks the same
+/// neighbourhood again. With the cache inside this function every retry re-read
+/// and re-decoded nodes it had just decoded. Sharing it is unconditionally safe
+/// here: a retry runs inside the same read transaction, against the same
+/// snapshot and the same graph revision, so a cached node cannot be stale.
 pub(crate) fn search(
     txn: &dyn ReadTxn,
     h: &Header,
     query: &[f32],
     ef: usize,
     allowed: Option<&HashSet<[u8; 16]>>,
+    cache: &mut NodeCache,
 ) -> Result<(Vec<[u8; 16]>, usize), TalaDbError> {
     let Some(mut entry) = h.entry else {
         return Ok((vec![], 0));
@@ -677,8 +696,7 @@ pub(crate) fn search(
     } else {
         query.to_vec()
     };
-    let mut cache = NodeCache::default();
-    let mut reader = Reader::new(txn, h, &mut cache);
+    let mut reader = Reader::new(txn, h, cache);
     for layer in (1..=h.level).rev() {
         entry = reader.greedy(&q, entry, layer)?;
     }

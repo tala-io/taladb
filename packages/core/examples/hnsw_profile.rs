@@ -68,6 +68,14 @@ fn main() {
         .nth(1)
         .and_then(|a| a.parse().ok())
         .unwrap_or(10_000);
+    // Cluster spread. Large values wash the clusters out and the set approaches
+    // uniform-on-sphere, which is the pathological case for any proximity graph
+    // in high dimensions — worth being able to vary before blaming the index.
+    let spread: f32 = std::env::args()
+        .nth(2)
+        .and_then(|a| a.parse().ok())
+        .unwrap_or(0.6);
+    println!("count {count}, spread {spread}, dims {DIMS}, clusters {CLUSTERS}");
 
     let mut rng = Rng(0x2545_F491_4F6C_DD1D);
     let centroids: Vec<Vec<f32>> = (0..CLUSTERS)
@@ -75,10 +83,10 @@ fn main() {
         .collect();
 
     let points: Vec<Vec<f32>> = (0..count)
-        .map(|i| make_point(&mut rng, &centroids[i % CLUSTERS], 0.6))
+        .map(|i| make_point(&mut rng, &centroids[i % CLUSTERS], spread))
         .collect();
     let probes: Vec<Vec<f32>> = (0..QUERIES)
-        .map(|q| make_point(&mut rng, &centroids[(q * 7) % CLUSTERS], 0.6))
+        .map(|q| make_point(&mut rng, &centroids[(q * 7) % CLUSTERS], spread))
         .collect();
 
     let db = Database::open_in_memory().unwrap();
