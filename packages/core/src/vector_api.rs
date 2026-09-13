@@ -702,8 +702,11 @@ impl Collection {
                 .max(wanted.saturating_mul(options.oversampling.unwrap_or(4)))
                 .min(count)
                 .max(1);
+            // One cache for the whole retry sequence — see `graph::search`.
+            let mut cache = graph::NodeCache::default();
             loop {
-                let (ids, distances) = graph::search(txn, h, query, ef, allowed.as_ref())?;
+                let (ids, distances) =
+                    graph::search(txn, h, query, ef, allowed.as_ref(), &mut cache)?;
                 execution.distance_computations += distances;
                 execution.ef_search = Some(ef);
                 // Exact rescoring always reads the original f32 vector from the

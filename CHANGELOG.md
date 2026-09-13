@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.11.5 — 2026-09-13
+
+- Raised HNSW recall by building layer 0 with `M_max0 = 2M` links, matching the algorithm and the pruning limit the same function already applied; recall@10 rose from 91.5% to 97.5% at efSearch 100 over 2,000 vectors, and from 93.5% to 99.5% at efSearch 400 over 10,000.
+- Cut HNSW graph construction time by roughly 12%: 12.0s to 10.8s at 2,000 vectors and 155s to 136s at 10,000, both at 384 dimensions.
+- Removed a heap clone of the stored vector on every distance computation by borrowing from the graph's decoder instead of returning an owned copy.
+- Cached each node's squared norm so cosine scoring no longer recomputes it per comparison, and replaced SipHash with a multiplicative hash for internal graph node ids.
+- Shared one node cache across an insert's two readers, across its back-linking pass, and across ANN retry attempts, removing repeated storage reads and decodes of nodes already in memory.
+- Carried the full candidate set between layers during insertion instead of only the nearest, per Malkov/Yashunin algorithm 1.
+- Added `cargo run -p taladb-core --example hnsw_profile` for measuring build time, query latency and recall against exact ground truth, with a cluster-spread argument for separating index quality from data difficulty.
+- Documented the remaining graph-traversal cost and recall-at-scale gaps in the roadmap, and corrected a stale entry that described HNSW as available only in the Node binding.
+
+No storage-format change: existing graphs open and search without a rebuild. Rebuilding an index built by an earlier version picks up the layer-0 improvement.
+
 ## 0.11.4 - 2026-09-12
 
 - Added full-text, vector, hybrid, and aggregation queries to the React Native TypeScript surface.
