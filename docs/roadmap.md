@@ -106,8 +106,9 @@ The [v0.9.x scan rewrite](#faster-flat-vector-search-shipped-in-v0-9-x) already 
 
 ### Graph traversal cost — approximate search still loses to the exact scan
 
-Shipped in v0.11.4 and measured with `cargo run --release -p taladb-core
---example hnsw_profile <count> [spread]`. Two gaps remain, both open.
+Persistent HNSW shipped in v0.11.4 and v0.11.5 made construction faster and
+recall better. Two gaps remain, both open, both reproducible with
+`cargo run --release -p taladb-core --example hnsw_profile <count> [spread]`.
 
 **Approximate search is slower than exact at small-to-mid corpus sizes.** At
 10,000 vectors of 384 dimensions, exact search runs 3.2 ms/query while ANN at
@@ -131,7 +132,7 @@ Two candidate fixes, neither attempted yet:
   by roughly an order of magnitude but is a storage-format change and forces a
   rebuild.
 
-**Recall degrades with corpus size faster than it should.** After the v0.11.4
+**Recall degrades with corpus size faster than it should.** After the v0.11.5
 fixes, recall@10 at `efSearch` 100 is 97.5% at 2,000 vectors but 65% at 10,000;
 a reference implementation stays near 95% at both. Part of this is the synthetic
 generator — recall moves with cluster spread (80.5% at 0.2, 75.5% at 0.4 on
