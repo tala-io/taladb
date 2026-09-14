@@ -378,8 +378,13 @@ jobs:
   # inside the react-native package, JNI headers come from the JDK, and neither
   # file links. That makes this a ~1 minute job rather than a ~20 minute one.
   #
+  # The link step is covered too, but separately and for one reason: alignment.
+  # 0.11.5 shipped `libtaladb_jsi.so` aligned to 4 KB, which no Android 15 device
+  # can load and which Google Play rejects — and every syntax check above passed,
+  # because alignment is decided by the linker and nothing here used to reach it.
+  #
   # Still not covered: ios/TalaDB.mm, which imports React CocoaPods headers that
-  # only exist after `pod install`, and the CMake/Gradle link step. Both need a
+  # only exist after `pod install`, and the Gradle packaging step. Both need a
   # real app build.
   # ---------------------------------------------------------------------------
   rn-native:
@@ -456,6 +461,26 @@ jobs:
             -I "$JSI" -I "$RN/cpp" \
             -I "$JAVA_HOME/include" -I "$JAVA_HOME/include/linux" \
             "$RN/cpp/TalaDBJni.cpp"
+
+      # Drives the real CMakeLists with the real NDK, stubbing only the two
+      # things Gradle would otherwise supply (the ReactAndroid prefab and the
+      # prebuilt Rust library) — neither of which affects alignment. Pinned to
+      # r27 deliberately: its linker defaults to 4 KB, so this fails unless the
+      # build sets max-page-size itself, which is the property worth protecting.
+      - name: Android link — 16 KB page alignment
+        run: |
+          set -euo pipefail
+          # r27.1 is the version android/build.gradle falls back to when the
+          # consuming app declares no ext.ndkVersion, and its linker defaults to
+          # 4 KB. Testing a newer NDK instead would pass on its default and prove
+          # nothing about the consumers actually at risk.
+          NDK_VERSION=27.1.12297006
+          SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          if [ ! -d "$SDK/ndk/$NDK_VERSION" ]; then
+            yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDK_VERSION" > /dev/null
+          fi
+          ANDROID_NDK_HOME="$SDK/ndk/$NDK_VERSION" \
+            packages/bindings/react-native/scripts/check-android-alignment.sh
 
 
   # ---------------------------------------------------------------------------
