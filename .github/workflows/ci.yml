@@ -474,12 +474,25 @@ jobs:
           # consuming app declares no ext.ndkVersion, and its linker defaults to
           # 4 KB. Testing a newer NDK instead would pass on its default and prove
           # nothing about the consumers actually at risk.
-          NDK_VERSION=27.1.12297006
           SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
-          if [ ! -d "$SDK/ndk/$NDK_VERSION" ]; then
-            yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDK_VERSION" > /dev/null
+
+          # Any r27 will do — the 4 KB default is a property of that major, not
+          # of a patch release — so prefer one the image already carries and
+          # only download the pinned fallback version when there is none.
+          NDK_DIR="$(ls -d "$SDK"/ndk/27.* 2>/dev/null | sort -V | tail -1 || true)"
+          if [ -z "$NDK_DIR" ]; then
+            NDK_VERSION=27.1.12297006
+            SDKMANAGER="$SDK/cmdline-tools/latest/bin/sdkmanager"
+            [ -x "$SDKMANAGER" ] || { echo "::error::sdkmanager not found at $SDKMANAGER"; exit 1; }
+            # Not `yes |`: sdkmanager stops reading once it has its answers, and
+            # the resulting SIGPIPE fails the pipeline under `set -o pipefail`.
+            # A bounded input fits the pipe buffer and never blocks.
+            printf 'y\n%.0s' $(seq 20) | "$SDKMANAGER" "ndk;$NDK_VERSION" > /dev/null
+            NDK_DIR="$SDK/ndk/$NDK_VERSION"
           fi
-          ANDROID_NDK_HOME="$SDK/ndk/$NDK_VERSION" \
+          echo "Using NDK: $NDK_DIR"
+
+          ANDROID_NDK_HOME="$NDK_DIR" \
             packages/bindings/react-native/scripts/check-android-alignment.sh
 
 
