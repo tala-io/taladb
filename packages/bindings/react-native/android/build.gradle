@@ -17,7 +17,11 @@ react {
 
 android {
   compileSdkVersion 36
-  ndkVersion "27.1.12297006"
+  // Honour the consuming app's NDK when it declares one — the React Native
+  // template sets `ext.ndkVersion` in its root build.gradle. Pinning this
+  // unconditionally forced every consumer onto r27 regardless of what the rest
+  // of their app was built with.
+  ndkVersion rootProject.ext.has("ndkVersion") ? rootProject.ext.get("ndkVersion") : "27.1.12297006"
   namespace "com.taladb"
 
   buildFeatures {
