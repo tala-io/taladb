@@ -35,8 +35,13 @@ TOOLCHAIN="$NDK/build/cmake/android.toolchain.cmake"
 JSI="${RN_JSI_DIR:-$(cd "$RN_DIR" && node -e "const p=require('path'),r=require.resolve('react-native/package.json');console.log(p.join(p.dirname(r),'ReactCommon','jsi'))")}"
 [ -f "$JSI/jsi/jsi.h" ] || { echo "error: no jsi.h under $JSI"; exit 1; }
 
-READELF="$(ls "$NDK"/toolchains/llvm/prebuilt/*/bin/llvm-readelf | head -1)"
-CLANG="$(ls "$NDK"/toolchains/llvm/prebuilt/*/bin/clang | head -1)"
+# Globbed rather than `ls | head -1`: every early-exiting pipe in this script
+# used to be a race against SIGPIPE (see the alignment read below).
+readelfs=("$NDK"/toolchains/llvm/prebuilt/*/bin/llvm-readelf)
+clangs=("$NDK"/toolchains/llvm/prebuilt/*/bin/clang)
+READELF="${readelfs[0]}"
+CLANG="${clangs[0]}"
+[ -x "$READELF" ] && [ -x "$CLANG" ] || { echo "error: no llvm toolchain under $NDK"; exit 1; }
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -79,8 +84,14 @@ for abi in "${ABIS[@]}"; do
   # all. A few lines of cmake chatter is a fair price for always seeing why.
   cmake --build "$WORK/build-$abi" --target taladb_jsi -j"$(nproc)"
 
-  so="$(find "$WORK/build-$abi" -name libtaladb_jsi.so | head -1)"
-  align="$("$READELF" -lW "$so" | awk '$1=="LOAD"{print $NF; exit}')"
+  so="$(find "$WORK/build-$abi" -name libtaladb_jsi.so -print -quit)"
+  [ -n "$so" ] || { echo "error: $abi linked but produced no libtaladb_jsi.so"; exit 1; }
+
+  # awk reads to EOF instead of exiting at the first LOAD. Quitting early sends
+  # SIGPIPE to llvm-readelf, which exits 74 (EX_IOERR) and fails the whole run
+  # under `set -o pipefail` — intermittently, since it is a race against how
+  # much readelf has managed to write.
+  align="$("$READELF" -lW "$so" | awk '$1=="LOAD" && !seen { a=$NF; seen=1 } END { print a }')"
 
   case "$align" in
     0x4000|0x10000) printf '  %-14s %-8s OK\n' "$abi" "$align" ;;
