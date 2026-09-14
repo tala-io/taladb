@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.11.6 — 2026-09-14
+
+- Fixed `libtaladb_jsi.so` being linked with 4 KB page alignment, which made any app bundling the React Native binding fail Google Play's 16 KB page size requirement for Android 15 and later, and prevented it loading at all on a 16 KB device. The C++ glue now links with `-Wl,-z,max-page-size=16384` explicitly; the prebuilt Rust libraries were already aligned.
+- Stopped the Android binding pinning `ndkVersion` to r27 unconditionally. It now honours `ext.ndkVersion` from the consuming app's root `build.gradle` — which the React Native template sets — and falls back to r27.1 only when the app declares none. Pinning it forced every consumer onto an NDK whose default page alignment is 4 KB, regardless of what the rest of their application was built with.
+
+- Added a CI check that links the Android glue against NDK r27 and asserts the result is 16 KB aligned. The existing job compiled both translation units but never linked them, so the defect above passed every check it had.
+
+No API, storage-format or behaviour change: this is a link-time fix. Android consumers should rebuild to pick it up; a clean build of the `:taladb_react-native` module is needed because the object is cached per CMake configuration.
+
 ## 0.11.5 — 2026-09-13
 
 - Raised HNSW recall by building layer 0 with `M_max0 = 2M` links, matching the algorithm and the pruning limit the same function already applied; recall@10 rose from 91.5% to 97.5% at efSearch 100 over 2,000 vectors, and from 93.5% to 99.5% at efSearch 400 over 10,000.
