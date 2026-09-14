@@ -43,3 +43,15 @@ target_link_libraries(taladb_jsi
     android
     log
 )
+
+# ---------------------------------------------------------------------------
+# 16 KB page size (Android 15+)
+#
+# A device with 16 KB pages cannot load a shared library whose LOAD segments are
+# aligned to 4 KB, and Google Play requires 16 KB support of every app targeting
+# Android 15 or later. NDK r28+ links with a 16 KB max-page-size by default, but
+# r27 and earlier do not — so set it here rather than inheriting whatever the
+# consuming app's NDK happens to default to. The prebuilt Rust libraries are
+# already aligned; this is the one object we link ourselves.
+# ---------------------------------------------------------------------------
+target_link_options(taladb_jsi PRIVATE "-Wl,-z,max-page-size=16384")
