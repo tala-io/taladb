@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.11.7 — 2026-09-15
 
 - Removed `android.permission.INTERNET` from the React Native binding's manifest. The manifest merger granted it to every consuming application, so an app that never opens a socket still shipped — and had to justify on its store listing — a network permission it did not use. The sync feature that once needed it was removed in 0.11.0; the binding opens no socket and the FFI crate pulls in no network dependency. Apps that need the permission can declare it themselves.
 
