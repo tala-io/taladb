@@ -1,3 +1,15 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <uses-permission android:name="android.permission.INTERNET" />
+    <!--
+      Deliberately empty.
+
+      This manifest used to declare android.permission.INTERNET, which the
+      manifest merger then granted to every application embedding the binding.
+      TalaDB is an embedded local database: it opens no socket, and the sync
+      feature that once justified the permission was removed in 0.11.0.
+
+      A library that silently adds INTERNET to its consumers is a problem for
+      any app whose selling point is that it works offline — the permission is
+      visible on the store listing and in the APK, and the app author cannot
+      explain it. Consumers who do need it can declare it themselves.
+    -->
 </manifest>
