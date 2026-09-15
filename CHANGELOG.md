@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Removed `android.permission.INTERNET` from the React Native binding's manifest. The manifest merger granted it to every consuming application, so an app that never opens a socket still shipped — and had to justify on its store listing — a network permission it did not use. The sync feature that once needed it was removed in 0.11.0; the binding opens no socket and the FFI crate pulls in no network dependency. Apps that need the permission can declare it themselves.
+
 ## 0.11.6 — 2026-09-14
 
 - Fixed `libtaladb_jsi.so` being linked with 4 KB page alignment, which made any app bundling the React Native binding fail Google Play's 16 KB page size requirement for Android 15 and later, and prevented it loading at all on a 16 KB device. The C++ glue now links with `-Wl,-z,max-page-size=16384` explicitly; the prebuilt Rust libraries were already aligned.
