@@ -717,30 +717,21 @@ impl Collection {
                 .min(count)
                 .max(1);
             // One cache for the whole retry sequence — see `graph::search` — and
-            // now for the whole process: it is taken out of the shared map here
-            // and put back below, so the next query reuses the decoded nodes
-            // instead of re-reading them. Taking it out rather than holding the
-            // lock keeps concurrent queries from serialising on one graph; the
-            // worst case is two queries both decoding and the last one winning,
-            // which is a cache miss, not a wrong answer.
+            // now for the whole process: the lease takes it out of the shared
+            // map and returns it on every exit path, including the error ones.
+            // Taking it out rather than holding the lock keeps concurrent
+            // queries from serialising on one graph; the worst case is two
+            // queries both decoding and the last one winning, which is a cache
+            // miss, not a wrong answer.
             //
             // `h.revision` is the vector-table revision this graph was built
             // against, and the `ready` check above already refused to run ANN
             // unless it matches the table's current revision — so a cache tagged
             // with the same revision cannot hold nodes from a different graph.
-            let mut cache = {
-                let mut shared = self
-                    .node_cache()
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                match shared.remove(&h.table) {
-                    Some(entry) if entry.revision == h.revision => entry.cache,
-                    _ => graph::NodeCache::default(),
-                }
-            };
+            let mut lease = graph::CacheLease::take(self.node_cache(), &h.table, h.revision);
             loop {
                 let (ids, distances) =
-                    graph::search(txn, h, query, ef, allowed.as_ref(), &mut cache)?;
+                    graph::search(txn, h, query, ef, allowed.as_ref(), lease.cache_mut())?;
                 execution.distance_computations += distances;
                 execution.ef_search = Some(ef);
                 // Exact rescoring always reads the original f32 vector from the
@@ -770,19 +761,6 @@ impl Collection {
                     break;
                 }
                 ef = ef.saturating_mul(2).min(count);
-            }
-            {
-                let mut shared = self
-                    .node_cache()
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                shared.insert(
-                    h.table.clone(),
-                    graph::CachedGraph {
-                        revision: h.revision,
-                        cache,
-                    },
-                );
             }
         } else {
             // Grouping must see all candidates before truncation: simply

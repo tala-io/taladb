@@ -302,6 +302,14 @@ pub(crate) struct NodeCache {
     bytes: usize,
 }
 
+#[cfg(test)]
+impl NodeCache {
+    /// Test-only: lets the lease tests tell a reused cache from a fresh one.
+    fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
+}
+
 /// Retained decoded nodes for one graph, tagged with the vector revision they
 /// were read at.
 ///
@@ -317,6 +325,80 @@ pub(crate) struct NodeCache {
 pub(crate) struct CachedGraph {
     pub revision: u64,
     pub cache: NodeCache,
+}
+
+/// A borrowed graph cache that always finds its way home.
+///
+/// `search_vectors` takes the cache out of the shared map rather than holding
+/// the lock across a query, so concurrent queries on one graph do not
+/// serialise. The cost of that choice is that the put-back has to happen on
+/// every exit path, and an ANN query has several: the graph read, the snapshot
+/// read of each vector, loading the documents and reducing them can all fail,
+/// and each `?` used to leave the map without an entry. The next query then
+/// paid a full decode — a cache that silently emptied itself whenever anything
+/// went wrong.
+///
+/// Returning it in `Drop` covers the error paths and a panic alike.
+pub(crate) struct CacheLease<'a> {
+    shared: &'a SharedNodeCache,
+    table: String,
+    revision: u64,
+    cache: Option<NodeCache>,
+}
+
+impl<'a> CacheLease<'a> {
+    /// Take the cache for `table`, or start an empty one when nothing is
+    /// cached or what is cached was built against a different revision.
+    pub(crate) fn take(shared: &'a SharedNodeCache, table: &str, revision: u64) -> Self {
+        let cache = {
+            let mut map = shared
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match map.remove(table) {
+                Some(entry) if entry.revision == revision => entry.cache,
+                _ => NodeCache::default(),
+            }
+        };
+        Self {
+            shared,
+            table: table.to_string(),
+            revision,
+            cache: Some(cache),
+        }
+    }
+
+    pub(crate) fn cache_mut(&mut self) -> &mut NodeCache {
+        self.cache
+            .as_mut()
+            .expect("the cache is only taken in Drop")
+    }
+}
+
+impl Drop for CacheLease<'_> {
+    fn drop(&mut self) {
+        let Some(cache) = self.cache.take() else {
+            return;
+        };
+        let mut map = self
+            .shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // An eviction may have happened while this query ran — a rebuild
+        // through another handle, say. Putting the old nodes back would undo
+        // it, so only return them if nothing newer has claimed the slot.
+        match map.get(&self.table) {
+            Some(existing) if existing.revision != self.revision => {}
+            _ => {
+                map.insert(
+                    self.table.clone(),
+                    CachedGraph {
+                        revision: self.revision,
+                        cache,
+                    },
+                );
+            }
+        }
+    }
 }
 
 /// Shared across every `Collection` handle from the same `Database`, keyed by
@@ -744,4 +826,89 @@ pub(crate) fn search(
         .map(|h| reader.node(h.1).map(|n| n.doc))
         .collect::<Result<Vec<_>, _>>()?;
     Ok((ids, reader.distances))
+}
+
+#[cfg(test)]
+mod cache_lease_tests {
+    use super::*;
+
+    fn shared() -> SharedNodeCache {
+        new_shared_node_cache()
+    }
+
+    #[test]
+    fn a_lease_returns_the_cache_when_it_is_dropped() {
+        let map = shared();
+        {
+            let _lease = CacheLease::take(&map, "graph::docs::embedding", 7);
+            assert!(
+                map.lock().unwrap().is_empty(),
+                "the cache is out on loan for the duration of a query",
+            );
+        }
+        let held = map.lock().unwrap();
+        assert!(
+            held.contains_key("graph::docs::embedding"),
+            "dropping must return it"
+        );
+        assert_eq!(held["graph::docs::embedding"].revision, 7);
+    }
+
+    /// The case that motivated `CacheLease`.
+    ///
+    /// An ANN query has several fallible steps, and the put-back used to sit
+    /// after all of them, so any `?` left the shared map without an entry and
+    /// the next query re-decoded the whole graph. Unwinding has to return it
+    /// just as a normal exit does.
+    #[test]
+    fn a_lease_returns_the_cache_when_the_query_unwinds() {
+        let map = shared();
+        let taken = std::panic::catch_unwind({
+            let map = map.clone();
+            move || {
+                let _lease = CacheLease::take(&map, "graph::docs::embedding", 3);
+                panic!("the query failed partway through");
+            }
+        });
+        assert!(taken.is_err(), "the panic should have propagated");
+        assert!(
+            map.lock().unwrap().contains_key("graph::docs::embedding"),
+            "a failed query must not empty the cache",
+        );
+    }
+
+    #[test]
+    fn a_stale_revision_is_not_reused() {
+        let map = shared();
+        drop(CacheLease::take(&map, "graph::docs::embedding", 1));
+        // A rebuild moves the graph on; the old nodes must not come back.
+        let mut lease = CacheLease::take(&map, "graph::docs::embedding", 2);
+        assert!(
+            lease.cache_mut().is_empty(),
+            "a different revision starts empty"
+        );
+        drop(lease);
+        assert_eq!(map.lock().unwrap()["graph::docs::embedding"].revision, 2);
+    }
+
+    /// An eviction during a query must win over the nodes the query is holding.
+    #[test]
+    fn an_eviction_mid_query_is_not_undone_by_the_put_back() {
+        let map = shared();
+        let lease = CacheLease::take(&map, "graph::docs::embedding", 1);
+        // A rebuild through another handle evicts and repopulates at revision 2.
+        map.lock().unwrap().insert(
+            "graph::docs::embedding".to_string(),
+            CachedGraph {
+                revision: 2,
+                cache: NodeCache::default(),
+            },
+        );
+        drop(lease);
+        assert_eq!(
+            map.lock().unwrap()["graph::docs::embedding"].revision,
+            2,
+            "the older lease must not overwrite a newer graph",
+        );
+    }
 }
