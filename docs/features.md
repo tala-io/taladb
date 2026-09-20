@@ -326,7 +326,7 @@ See the [Change Webhook reference](/api/webhook).
 
 ## CLI dev tools
 
-Download the pre-built `taladb-cli` binary for your platform from the [GitHub Releases page](https://github.com/taladb/taladb/releases):
+Download the pre-built `taladb-cli` binary for your platform from the [GitHub Releases page](https://github.com/tala-sh/taladb/releases):
 
 ```bash
 taladb inspect myapp.db          # show collections, document counts, index names

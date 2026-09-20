@@ -1510,9 +1510,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.45"
+version = "0.23.43"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
+checksum = "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06"
 dependencies = [
  "once_cell",
  "ring",
@@ -1767,7 +1767,7 @@ dependencies = [
 
 [[package]]
 name = "taladb-cli"
-version = "0.11.7"
+version = "0.11.8"
 dependencies = [
  "anyhow",
  "clap",
@@ -1781,7 +1781,7 @@ dependencies = [
 
 [[package]]
 name = "taladb-core"
-version = "0.11.7"
+version = "0.11.8"
 dependencies = [
  "aes-gcm",
  "criterion",
@@ -1806,7 +1806,7 @@ dependencies = [
 
 [[package]]
 name = "taladb-ffi"
-version = "0.11.7"
+version = "0.11.8"
 dependencies = [
  "serde_json",
  "taladb-core",
@@ -1815,7 +1815,7 @@ dependencies = [
 
 [[package]]
 name = "taladb-node"
-version = "0.11.7"
+version = "0.11.8"
 dependencies = [
  "napi",
  "napi-build",
@@ -1827,7 +1827,7 @@ dependencies = [
 
 [[package]]
 name = "taladb-web"
-version = "0.11.7"
+version = "0.11.8"
 dependencies = [
  "console_error_panic_hook",
  "getrandom 0.3.4",

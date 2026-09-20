@@ -26,3 +26,6 @@ docs/.vitepress/cache/
 PLAN-*.md
 .gstack/
 reviews/
+
+# internal docs
+ROADMAP-INTERNAL.md

@@ -5,5 +5,8 @@ packages:
   - "packages/tools/*"
   - "examples/*"
 
+allowBuilds:
+  esbuild: set this to true or false
+
 onlyBuiltDependencies:
   - esbuild

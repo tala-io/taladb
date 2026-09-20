@@ -390,7 +390,21 @@ impl Collection {
             None => self.existing_graph_options(&WriteView(txn.as_ref()), &key)?,
         };
         self.build_graph_in(txn.as_mut(), &def, options)?;
-        txn.commit()
+        txn.commit()?;
+        // A rebuild rewrites links (and renumbers nodes when it compacts
+        // tombstones) while leaving the vector revision untouched, so the
+        // revision tag alone would let a cache outlive the graph it describes.
+        //
+        // This is a recall guard, not a correctness one, and the difference is
+        // worth stating: the ANN loop above rescores every returned id against
+        // the vector table in the current snapshot, so a stale graph can only
+        // change *which* candidates are considered, never their scores and never
+        // whether a deleted document can surface. Attempts to produce a wrong
+        // answer from a stale cache here did not manage it — HNSW still lands on
+        // good neighbours through slightly wrong links. Evicting is cheap and
+        // keeps recall tied to the graph that is actually on disk.
+        self.evict_node_cache(field);
+        Ok(())
     }
     fn existing_graph_options(
         &self,
@@ -702,8 +716,28 @@ impl Collection {
                 .max(wanted.saturating_mul(options.oversampling.unwrap_or(4)))
                 .min(count)
                 .max(1);
-            // One cache for the whole retry sequence — see `graph::search`.
-            let mut cache = graph::NodeCache::default();
+            // One cache for the whole retry sequence — see `graph::search` — and
+            // now for the whole process: it is taken out of the shared map here
+            // and put back below, so the next query reuses the decoded nodes
+            // instead of re-reading them. Taking it out rather than holding the
+            // lock keeps concurrent queries from serialising on one graph; the
+            // worst case is two queries both decoding and the last one winning,
+            // which is a cache miss, not a wrong answer.
+            //
+            // `h.revision` is the vector-table revision this graph was built
+            // against, and the `ready` check above already refused to run ANN
+            // unless it matches the table's current revision — so a cache tagged
+            // with the same revision cannot hold nodes from a different graph.
+            let mut cache = {
+                let mut shared = self
+                    .node_cache()
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                match shared.remove(&h.table) {
+                    Some(entry) if entry.revision == h.revision => entry.cache,
+                    _ => graph::NodeCache::default(),
+                }
+            };
             loop {
                 let (ids, distances) =
                     graph::search(txn, h, query, ef, allowed.as_ref(), &mut cache)?;
@@ -736,6 +770,19 @@ impl Collection {
                     break;
                 }
                 ef = ef.saturating_mul(2).min(count);
+            }
+            {
+                let mut shared = self
+                    .node_cache()
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                shared.insert(
+                    h.table.clone(),
+                    graph::CachedGraph {
+                        revision: h.revision,
+                        cache,
+                    },
+                );
             }
         } else {
             // Grouping must see all candidates before truncation: simply

@@ -9,7 +9,7 @@
   "license": "MIT OR Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/taladb/taladb"
+    "url": "https://github.com/tala-sh/taladb"
   },
   "files": [
     "taladb_web_bg.wasm",
@@ -19,7 +19,7 @@
     "LICENSE-MIT"
   ],
   "main": "taladb_web.js",
-  "homepage": "https://github.com/taladb/taladb",
+  "homepage": "https://github.com/tala-sh/taladb",
   "types": "taladb_web.d.ts",
   "sideEffects": [
     "./snippets/*"

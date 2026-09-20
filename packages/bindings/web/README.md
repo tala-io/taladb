@@ -19,9 +19,14 @@ Browser WASM bindings for TalaDB — persistent local-first storage via WASM + O
 | Browser | OPFS (persistent) | In-memory fallback |
 |---------|-------------------|-------------------|
 | Chrome 109+ | ✅ | ✅ |
-| Safari 16.4+ | ✅ | ✅ |
-| Firefox | — | ✅ |
 | Edge 109+ | ✅ | ✅ |
+| Safari 16.4+ | ✅ | ✅ |
+| Firefox 111+ | ✅ | ✅ |
+| Firefox 89–110 | — | ✅ |
+
+The module is built with WebAssembly SIMD, which does not instantiate on
+engines that lack it. That sets the floor at Safari 16.4, Chrome 91 and
+Firefox 89 regardless of storage backend.
 
 ## Installation
 
@@ -86,7 +91,7 @@ pnpm --filter @taladb/web build
 
 ## Full Documentation
 
-**[https://taladb.github.io/taladb/guide/web](https://taladb.github.io/taladb/guide/web)**
+**[https://taladb.dev/guide/web](https://taladb.dev/guide/web)**
 
 ## License
 

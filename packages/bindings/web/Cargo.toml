@@ -80,7 +80,17 @@ features = [
 # cold start. `-Oz` plus name-section stripping is worth more to time-to-first-
 # query than any codegen difference in the query engine.
 [package.metadata.wasm-pack.profile.release]
-wasm-opt = ["-Oz", "--enable-bulk-memory", "--strip-debug", "--strip-producers"]
+# `--enable-simd` is not an optimisation request: the core's scoring loops are
+# built with `-C target-feature=+simd128` (see `.cargo/config.toml`), and
+# wasm-opt rejects a module containing instructions for a feature it has not
+# been told to accept. Without it the release build fails at the wasm-opt step.
+wasm-opt = [
+    "-Oz",
+    "--enable-bulk-memory",
+    "--enable-simd",
+    "--strip-debug",
+    "--strip-producers",
+]
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"

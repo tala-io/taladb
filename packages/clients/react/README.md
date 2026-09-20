@@ -3,7 +3,7 @@
 React and React Native hooks for TalaDB — live queries that re-render your components when the local database changes.
 
 [![npm](https://img.shields.io/npm/v/@taladb/react)](https://www.npmjs.com/package/@taladb/react)
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-orange.svg)](https://github.com/taladb/taladb/blob/main/LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-orange.svg)](https://github.com/tala-sh/taladb/blob/main/LICENSE)
 
 ## What this gives you
 

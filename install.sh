@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # TalaDB CLI installer
 # Usage:
-#   curl -fsSL https://github.com/taladb/taladb/releases/latest/download/install.sh | bash
+#   curl -fsSL https://github.com/tala-sh/taladb/releases/latest/download/install.sh | bash
 #
 # Options (env vars):
 #   VERSION     — pin a specific release tag, e.g. VERSION=v0.11.0
@@ -9,7 +9,7 @@
 
 set -euo pipefail
 
-REPO="taladb/taladb"
+REPO="tala-sh/taladb"
 BIN="taladb"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 VERSION="${VERSION:-latest}"

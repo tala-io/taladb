@@ -87,7 +87,7 @@ pnpm --filter @taladb/node build
 
 ## Full Documentation
 
-**[https://taladb.github.io/taladb/guide/node](https://taladb.github.io/taladb/guide/node)**
+**[https://taladb.dev/guide/node](https://taladb.dev/guide/node)**
 
 ## License
 

@@ -1,6 +1,6 @@
 {
   "name": "taladb",
-  "version": "0.11.7",
+  "version": "0.11.8",
   "description": "The embedded vector database for on-device AI — documents, similarity search, and offline sync for browser, React Native, and Node.js",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
@@ -48,12 +48,12 @@
   "license": "MIT OR Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/taladb/taladb.git",
+    "url": "https://github.com/tala-sh/taladb.git",
     "directory": "packages/clients/taladb"
   },
-  "homepage": "https://taladb.github.io/taladb/",
+  "homepage": "https://taladb.dev/",
   "bugs": {
-    "url": "https://github.com/taladb/taladb/issues"
+    "url": "https://github.com/tala-sh/taladb/issues"
   },
   "engines": {
     "node": ">=18"

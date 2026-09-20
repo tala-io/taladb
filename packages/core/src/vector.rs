@@ -372,15 +372,31 @@ pub fn score_with_query_norm(
 /// usually empty.
 const LANES: usize = 8;
 
-/// Dot product and the stored vector's squared L2 norm, in one pass.
+/// Dot product and the stored vector's squared L2 norm.
 ///
-/// Cosine needs both, and reading each element once keeps the pass
-/// memory-bound rather than doing two walks over the same data.
+/// Cosine needs both. These were once accumulated in a single fused loop, to
+/// read each element once and keep the pass memory-bound. That fusion cost far
+/// more than the second walk saved: two `[f32; LANES]` accumulators live in one
+/// loop body exceed what LLVM's SLP vectoriser will keep in registers, so it
+/// gave up and emitted the whole reduction scalar. Measured with
+/// `--emit=asm -C opt-level=3`, counting vector instructions in this function:
+///
+/// | target                | fused | split |
+/// |-----------------------|-------|-------|
+/// | wasm32 `+simd128`     |     0 |    74 |
+/// | aarch64 (NEON)        |     2 |    26 |
+/// | x86_64 (SSE2 baseline)|   114 |   132 |
+///
+/// x86_64 vectorised either way, which is why the regression went unseen: the
+/// benchmark machine is x86. The browser and every Apple target — where this is
+/// the flat scan's innermost loop — were running it scalar.
+///
+/// Both passes are zipped against `q_lanes`, not just the norm's own chunks, so
+/// a length mismatch still ends the reduction at the shorter side exactly as the
+/// fused loop did. Per-lane accumulation order is unchanged, so both totals are
+/// bit-identical to the fused version — see the test at the bottom of this file.
 #[inline]
 fn dot_and_norm_sq(query: &[f32], stored: &[f32]) -> (f32, f32) {
-    let mut dot = [0.0f32; LANES];
-    let mut norm_sq = [0.0f32; LANES];
-
     // `as_chunks` rather than `chunks_exact`: the chunks arrive as
     // `&[[f32; LANES]]`, so `q[i]` for `i in 0..LANES` is in bounds by type and
     // needs no bounds check at all. With `chunks_exact` each chunk is a
@@ -388,9 +404,19 @@ fn dot_and_norm_sq(query: &[f32], stored: &[f32]) -> (f32, f32) {
     // happens to prove the range — which is a thin thing to rest a hot loop on.
     let (q_lanes, q_rest) = query.as_chunks::<LANES>();
     let (s_lanes, s_rest) = stored.as_chunks::<LANES>();
+
+    let mut dot = [0.0f32; LANES];
     for (q, s) in q_lanes.iter().zip(s_lanes) {
         for i in 0..LANES {
             dot[i] += q[i] * s[i];
+        }
+    }
+
+    // `_q` is unused, but zipping against it keeps this loop's element set
+    // identical to the one above when the two slices differ in length.
+    let mut norm_sq = [0.0f32; LANES];
+    for (_q, s) in q_lanes.iter().zip(s_lanes) {
+        for i in 0..LANES {
             norm_sq[i] += s[i] * s[i];
         }
     }
@@ -627,6 +653,72 @@ mod tests {
                 old_norm.to_bits(),
                 "norm_sq diverged at len={len}"
             );
+        }
+    }
+
+    /// Splitting the fused pass into two loops introduced a way to get this
+    /// wrong that the equal-length test above cannot see: if the norm loop
+    /// walked the stored vector's own chunks instead of zipping against the
+    /// query's, a shorter query would leave the norm accumulating over stored
+    /// elements the dot product never reached.
+    ///
+    /// The reference is the fused original, not a hand-derived "common prefix":
+    /// when the two slices land in different numbers of lane chunks the
+    /// remainder zip pairs elements at different offsets (at `ql=7, sl=9` it
+    /// multiplies `q[0]` by `s[8]`). That is odd, but it predates this split and
+    /// is only reachable on a length mismatch, which `find_nearest` rejects
+    /// before scoring. What must not change is that the split agrees with the
+    /// fused loop bit for bit.
+    #[test]
+    fn mismatched_lengths_match_the_fused_original_bit_for_bit() {
+        #[allow(clippy::chunks_exact_to_as_chunks)]
+        fn fused(query: &[f32], stored: &[f32]) -> (f32, f32) {
+            let mut dot = [0.0f32; LANES];
+            let mut norm_sq = [0.0f32; LANES];
+            let mut q_chunks = query.chunks_exact(LANES);
+            let mut s_chunks = stored.chunks_exact(LANES);
+            for (q, s) in q_chunks.by_ref().zip(s_chunks.by_ref()) {
+                for i in 0..LANES {
+                    dot[i] += q[i] * s[i];
+                    norm_sq[i] += s[i] * s[i];
+                }
+            }
+            let mut dot_total: f32 = dot.iter().sum();
+            let mut norm_total: f32 = norm_sq.iter().sum();
+            for (q, s) in q_chunks.remainder().iter().zip(s_chunks.remainder()) {
+                dot_total += q * s;
+                norm_total += s * s;
+            }
+            (dot_total, norm_total)
+        }
+
+        let mut seed = 0x5DEE_CE66_D125_u64;
+        let mut next = move || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let bits = (seed >> 33) as u32;
+            (f32::from_bits((bits & 0x007F_FFFF) | 0x3F80_0000) - 1.5) * 1e3
+        };
+
+        // Both orderings, mismatches inside a lane chunk and across a chunk
+        // boundary, and the empty-side cases.
+        for (ql, sl) in [
+            (8usize, 16usize),
+            (16, 8),
+            (7, 9),
+            (9, 7),
+            (384, 385),
+            (385, 384),
+            (0, 8),
+            (8, 0),
+        ] {
+            let q: Vec<f32> = (0..ql).map(|_| next()).collect();
+            let s: Vec<f32> = (0..sl).map(|_| next()).collect();
+            let (dot, norm) = dot_and_norm_sq(&q, &s);
+            let (fd, fnm) = fused(&q, &s);
+            assert_eq!(dot.to_bits(), fd.to_bits(), "dot at ql={ql} sl={sl}");
+            assert_eq!(norm.to_bits(), fnm.to_bits(), "norm at ql={ql} sl={sl}");
         }
     }
 }

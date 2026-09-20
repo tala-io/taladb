@@ -5,181 +5,75 @@ description: Planned and in-progress features for TalaDB
 
 # Roadmap
 
-This page tracks planned and in-progress work for TalaDB. Sections and items are ordered by estimated impact — things at the top affect the most users and unblock the most use cases.
+What's planned for TalaDB, roughly in order of impact. Shipped work is recorded
+in the [changelog](https://github.com/tala-sh/taladb/blob/main/CHANGELOG.md);
+this page tracks only what's still open.
 
-Have an idea or want to help prioritise? Open a [GitHub Discussion](https://github.com/taladb/taladb/discussions) or a feature request issue.
-
----
-
-## 1 · Developer experience
-
-Better DX drives adoption and reduces time-to-production.
-
-### Change webhook
-
-The [change webhook](/api/webhook) shipped in **v0.11.0**, replacing the sync
-engine. Remaining work:
-
-- **Coalescing.** Delivery fires one request per affected document, with no
-  debounce or batch window; the only timing knob is per-request retry backoff
-  (200/400/800 ms × 3), which is unrelated. A `batch: { maxEvents, maxWaitMs }`
-  option would let a bulk import send one request instead of five hundred.
-- **A durable outbox, opt-in.** Delivery is best effort — a crash or a closed
-  tab drops in-flight events, while retries may duplicate. Some applications genuinely need durable at-least-once;
-  those need events written to a reserved collection inside the mutation's own
-  transaction and drained separately. Deliberately opt-in: it re-adds the
-  per-write cost that removing tombstones just reclaimed.
-- **Multi-tab write forwarding — durability under tab loss.** A tab without the
-  OPFS lock forwards its writes to the tab that holds it (see the
-  [web guide](/guide/web#multi-tab-behaviour)). The hand-off is a
-  BroadcastChannel post, so a write committed locally and then interrupted by an
-  immediate tab close can still be lost. An acknowledgement round-trip, or
-  routing writes to the primary *before* committing locally, would close it.
-
-### Schema evolution on React Native — pending on-device verification
-
-The `openDB({ migrations })` version accessors (`userVersion` / `setUserVersion`)
-are wired through the full React Native stack — Rust FFI, C header, and the JSI
-HostObject (C++) — and feature-detected by the TS client so an older native
-module degrades gracefully. The Rust and TS layers compile and typecheck, but the
-JSI native glue has **not** been built or exercised on a device or simulator;
-that verification (iOS + Android) is the remaining gate. Read-time
-`migrateDocument` + `persistMigrations` and `_v` upgrades ship on browser + Node
-— see [Schema Validation](/api/schema).
-
-### Compound indexes — remaining work
-
-Multi-field B-tree indexes shipped (Node.js + browser; React Native pending on-device verification). Still to do:
-
-- Partial-prefix and trailing-range matching — use the index when only the leading field(s) are constrained, or the last is a range.
-- Per-field **descending** order (`CompoundIndexDef` has no direction yet).
-- The `createIndex(['a','b'])` array-sugar overload.
-
-### `taladb generate` — TypeScript type generation
-
-Inspect a live database and emit TypeScript interfaces for each collection, inferred from the stored documents. Useful for projects that don't start with a schema.
-
-### Framework adapters — Svelte and Vue
-
-- **`@taladb/svelte`** — `readable` stores backed by `Collection.subscribe`, plus a `TalaDBContext` Svelte context helper. `$findResult` is a readable store that re-derives on every write matching the filter.
-- **`@taladb/vue`** — `useFind` and `useFindOne` composables built on Vue's `ref` + `watchEffect`, mirroring the `@taladb/react` hook API.
-
-Both packages are thin wrappers over the same event model used by the React hooks.
-
-### VS Code extension
-
-Syntax highlighting for TalaDB filter expressions in JSON, inline document previews, and a collection browser panel in the VS Code sidebar.
+Have an idea, or want to help prioritise? Open a
+[GitHub Discussion](https://github.com/tala-sh/taladb/discussions) or a feature
+request issue.
 
 ---
 
-## 2 · Performance & vector search
+## Developer experience
 
-Driven by findings from the measurement suites in `scripts/` (`pnpm bench`, `pnpm bench:web`). The goal: keep TalaDB among the fastest embedded databases on every JS runtime.
-
-### Vector cache sizing
-
-Exact search keeps a bounded decoded-vector cache and persistent HNSW reads
-graph records on demand. Remaining work is adaptive cache sizing from the
-device memory budget and workload rather than one fixed default.
-
-### SIMD dot products (WASM validated, native next)
-
-The scoring reductions are scalar today. The WASM lever is **measured and confirmed**, and productizing it is the top browser-perf task:
-
-- **WASM** — a `+simd128` build was A/B'd on the benchmark laptop and **~halves** browser vector search (50k: 172 ms → 81 ms; 10k: 35 ms → 17 ms), restoring near-native parity. The remaining work is *shipping* it safely: a single simd128 module fails to instantiate on browsers without WASM SIMD (Safari 15.2–16.3, which TalaDB otherwise supports via OPFS), so this needs either dual builds with runtime feature detection (load simd or scalar `.wasm`) or a deliberate baseline bump to simd128-capable browsers. The build itself is just `RUSTFLAGS="-C target-feature=+simd128"` — LLVM autovectorizes the v0.9.0 byte-streaming loops with no code change. (Also: the `release-wasm` profile in `Cargo.toml` sets `opt-level = "z"` but is *unused* — remove it so nobody ships size-optimized vectors by accident.)
-- **Native**: the release profile sets no `target-cpu`, so distributed binaries can't assume AVX2/NEON. An explicit `std::simd` (or chunked-FMA) dot-product kernel with runtime feature detection would vectorise the multiply-add without breaking portability of the prebuilt `.node`.
-
-### Query planner — remaining work
-
-Bounded two-sided range plans (`$gte` + `$lt` on one indexed field → a single bounded index scan) shipped. Still to do: extend to `$in` + range combinations on compound indexes once partial-prefix matching lands.
-
-### HNSW performance tuning by device class
-
-Persistent, resumable HNSW builds and incremental writes are available on
-browser, Node.js, and React Native. Remaining work is a device-aware benchmark
-matrix for recommended `m`, `efConstruction`, `efSearch`, quantization, and
-batch sizes across low-memory phones and desktop workloads.
-
-### Faster filtered-vector pre-filters (id-only path)
-
-The [v0.9.x scan rewrite](#faster-flat-vector-search-shipped-in-v0-9-x) already skips *scoring* filtered-out vectors, but the pre-filter itself still runs `find()`, which materialises every matching document — embedding arrays included — just to collect their ids. An id-only execution path in the query executor (return ids without decoding document bodies) would cut the filter cost, especially for low-selectivity filters over large documents.
-
-### Graph traversal cost — approximate search still loses to the exact scan
-
-Persistent HNSW shipped in v0.11.4 and v0.11.5 made construction faster and
-recall better. Two gaps remain, both open, both reproducible with
-`cargo run --release -p taladb-core --example hnsw_profile <count> [spread]`.
-
-**Approximate search is slower than exact at small-to-mid corpus sizes.** At
-10,000 vectors of 384 dimensions, exact search runs 3.2 ms/query while ANN at
-`efSearch` 100 runs 8.5 ms — despite computing roughly a third as many
-distances. The cause is structural rather than algorithmic: every traversal step
-is a random point read that postcard-decodes an entire graph node, vector
-included, whereas the exact path decodes the vector table once into a
-generation-keyed cache and then scans it sequentially with no per-vector
-allocation.
-
-Two candidate fixes, neither attempted yet:
-
-- Give the graph path an equivalent cross-query cache, keyed by table and graph
-  revision. This is parity with the exact path rather than a new idea, but it
-  needs careful invalidation — a stale graph node returns wrong results, which
-  is far worse than a slow query.
-- Split the node record so links and vectors are separate keys. Traversal scores
-  many more nodes than it expands, and a node's vector is ~1.5 KB against a few
-  hundred bytes of links. With `Quantization::None` the vector is already stored
-  in the vector table, so the graph copy is redundant. This shrinks graph nodes
-  by roughly an order of magnitude but is a storage-format change and forces a
-  rebuild.
-
-**Recall degrades with corpus size faster than it should.** After the v0.11.5
-fixes, recall@10 at `efSearch` 100 is 97.5% at 2,000 vectors but 65% at 10,000;
-a reference implementation stays near 95% at both. Part of this is the synthetic
-generator — recall moves with cluster spread (80.5% at 0.2, 75.5% at 0.4 on
-5,000 vectors), and widely-spread points in 384 dimensions approach
-uniform-on-sphere, the pathological case for any proximity graph. But not all of
-it: the graph examines ~48% of a 5,000-vector collection to reach 80% recall,
-which is inefficient for `M=16`, `efConstruction=200`.
-
-Ruled out already: the layer-0 link budget (fixed — it used `M` where the
-algorithm specifies `M_max0 = 2M`), single-entry-point layer descent (fixed to
-carry the whole result set, worth ~0.5pp), and the level-assignment
-distribution, which is a correct geometric `1/M`. The next things to examine are
-the neighbour-selection heuristic's pruned-connection handling and whether
-measuring against a real embedding set rather than a synthetic one changes the
-picture.
-
-### Continuous benchmarks
-
-Run the Node and browser suites in CI on a fixed runner class per release and publish the trend, so performance regressions are caught before they ship. Extend with a React Native suite (the one runtime not yet covered).
+- **Change webhook delivery guarantees** — coalescing so a bulk import sends one
+  request instead of hundreds, an opt-in durable outbox for at-least-once
+  delivery, and acknowledged multi-tab write forwarding. See the
+  [webhook API](/api/webhook).
+- **Schema migrations on React Native** — the version accessors are wired
+  through the native stack and await on-device verification. Read-time
+  migrations already ship on browser and Node — see
+  [Schema Validation](/api/schema).
+- **Compound index coverage** — use an index when only the leading fields are
+  constrained or the last is a range, per-field descending order, and an array
+  shorthand for `createIndex`.
+- **`taladb generate`** — emit TypeScript interfaces for each collection,
+  inferred from the documents already stored.
+- **Svelte and Vue adapters** — `@taladb/svelte` stores and `@taladb/vue`
+  composables, over the same event model as the [React hooks](/guide/react).
+- **VS Code extension** — filter-expression highlighting, inline document
+  previews, and a collection browser.
 
 ---
 
-## 3 · Storage
+## Performance & vector search
 
-Internal improvements that improve efficiency and interoperability.
+The goal is to keep TalaDB among the fastest embedded databases on every
+JavaScript runtime.
 
-### Pluggable serialisation
-
-Allow the caller to swap `postcard` for `MessagePack` or `CBOR` via a `Codec` trait, making it easier to interoperate with databases or wire formats that already use those encodings.
-
-### Document TTL (time-to-live)
-
-Set an expiry on any document at write time:
-
-- `collection.insert({ ...doc, _ttl: Date.now() + 60_000 })` — document auto-deleted after the TTL elapses
-- Background reaper runs on a configurable interval (default: 60 s in Node.js, on next open in browser)
+- **Faster vector index builds** — graph construction is the current limit on
+  large indexes, and the main thing standing between approximate search and
+  mobile devices.
+- **Better approximate-search recall at scale** — recall falls off faster as a
+  collection grows than it should.
+- **Lower graph traversal cost** — smarter cache eviction and leaner cached
+  nodes, so larger graphs stay resident in memory.
+- **Wider native SIMD** — a runtime-detected AVX2/NEON kernel on top of the
+  portable vectorisation already in place.
+- **Faster filtered vector search** — stop materialising whole documents just to
+  collect the ids a filter matched.
+- **Index tuning guidance by device class** — recommended parameters from
+  low-memory phones through desktops.
+- **Adaptive cache sizing** — size the decoded-vector cache from the device's
+  memory budget instead of one fixed default.
+- **Continuous benchmarks** — run the suites in CI each release and publish the
+  trend, so regressions are caught before they ship.
 
 ---
 
-## 4 · Platform
+## Storage
 
-Expanding the runtimes TalaDB can target.
+- **Pluggable serialisation** — swap the internal encoding for MessagePack or
+  CBOR, to interoperate with formats you already use.
+- **Document TTL** — set an expiry when you write a document and have it swept
+  automatically.
 
-### Swift / Kotlin native packages
+---
 
-First-party Swift (`TalaDB.swift`) and Kotlin (`taladb-kotlin`) packages that wrap the C FFI layer directly, without React Native, for native iOS and Android apps that want an embedded document store.
+## Platform
 
-### WASI target
-
-Compile `taladb-core` to WASI (`wasm32-wasip1`) so it can run inside WASI runtimes (Wasmtime, WasmEdge, Fastly Compute) with filesystem access — bringing the same engine to server-side WASM environments.
+- **Swift and Kotlin packages** — first-party wrappers over the C FFI for native
+  iOS and Android apps, without React Native.
+- **WASI target** — run the same engine inside Wasmtime, WasmEdge and Fastly
+  Compute.
