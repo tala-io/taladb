@@ -6,12 +6,12 @@
 Store documents, run structured queries, and search vectors in one Rust database — across the browser, Node.js, and React Native. No cloud required.
 
 [![npm](https://img.shields.io/npm/v/taladb?label=npm)](https://www.npmjs.com/package/taladb)
-[![Status: Stable](https://img.shields.io/badge/Status-Stable-green)](https://github.com/taladb/taladb)
+[![Status: Stable](https://img.shields.io/badge/Status-Stable-green)](https://github.com/tala-sh/taladb)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT_OR_Apache--2.0-blue.svg)](#license)
 [![Rust](https://img.shields.io/badge/Rust-2024_Edition-orange?logo=rust)](https://www.rust-lang.org)
 [![WASM](https://img.shields.io/badge/WASM-wasm--bindgen-purple?logo=webassembly)](https://rustwasm.github.io/wasm-bindgen/)
-[![Platform](https://img.shields.io/badge/Platform-Browser%20%7C%20React%20Native%20%7C%20Node.js-green)](https://github.com/taladb/taladb)
-[![Sponsor](https://img.shields.io/badge/Sponsor-taladb-red?logo=github-sponsors)](https://github.com/sponsors/taladb)
+[![Platform](https://img.shields.io/badge/Platform-Browser%20%7C%20React%20Native%20%7C%20Node.js-green)](https://github.com/tala-sh/taladb)
+[![Sponsor](https://img.shields.io/badge/Sponsor-taladb-red?logo=github-sponsors)](https://github.com/sponsors/tala-sh)
 
 **[Documentation](https://taladb.dev) · [Web Demo](https://taladb-playground.vercel.app/) · [Mobile Demo](https://appetize.io/app/b_ugmjhjghdkgnjux4lzkepvsfma) · [Web Guide](https://taladb.dev/guide/web) · [Node.js Guide](https://taladb.dev/guide/node) · [React Native Guide](https://taladb.dev/guide/react-native)**
 

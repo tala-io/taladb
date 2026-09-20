@@ -21,9 +21,16 @@ core used on every other platform. Data is persisted to the
 
 | Feature | Chrome | Firefox | Safari |
 |---|---|---|---|
-| WASM (in-memory) | 79+ | 78+ | 14+ |
-| OPFS (fastest persistence) | 86+ | 111+ | 15.2+ |
-| IndexedDB fallback (persistence without OPFS) | 79+ | 78+ | 14+ |
+| WASM + SIMD (required to load) | 91+ | 89+ | 16.4+ |
+| OPFS (fastest persistence) | 91+ | 111+ | 16.4+ |
+| IndexedDB fallback (persistence without OPFS) | 91+ | 89+ | 16.4+ |
+
+The module is built with WebAssembly SIMD (`+simd128`), which the vector
+scoring loops rely on — without it the browser runs them scalar and vector
+search is roughly twice as slow. A WASM module using SIMD does not instantiate
+at all on an engine that lacks it, so SIMD support, not OPFS, sets the floor in
+every row above. Safari gained it in 16.4; Chrome in 91 and Firefox in 89, both
+of which predate their OPFS support.
 
 On browsers without OPFS, TalaDB automatically falls back to an
 IndexedDB-backed in-memory database. Data still persists across page reloads.

@@ -102,7 +102,7 @@ pnpm --filter @taladb/react-native build:android
 
 ## Full Documentation
 
-**[https://taladb.github.io/taladb/guide/react-native](https://taladb.github.io/taladb/guide/react-native)**
+**[https://taladb.dev/guide/react-native](https://taladb.dev/guide/react-native)**
 
 ## License
 

@@ -12,7 +12,7 @@ The `taladb` CLI lets you inspect, export, and manage TalaDB database files from
 One line, no version to look up:
 
 ```sh
-curl -fsSL https://github.com/taladb/taladb/releases/latest/download/install.sh | bash
+curl -fsSL https://github.com/tala-sh/taladb/releases/latest/download/install.sh | bash
 ```
 
 It detects your platform, downloads the matching binary from the newest release,
@@ -23,10 +23,10 @@ Two knobs:
 
 ```sh
 # pin a release
-VERSION=v0.11.0 curl -fsSL https://github.com/taladb/taladb/releases/latest/download/install.sh | bash
+VERSION=v0.11.0 curl -fsSL https://github.com/tala-sh/taladb/releases/latest/download/install.sh | bash
 
 # install somewhere else (created if missing, no sudo)
-INSTALL_DIR=~/.local/bin curl -fsSL https://github.com/taladb/taladb/releases/latest/download/install.sh | bash
+INSTALL_DIR=~/.local/bin curl -fsSL https://github.com/tala-sh/taladb/releases/latest/download/install.sh | bash
 ```
 
 ::: tip Prefer to read it first?
@@ -34,7 +34,7 @@ It is a plain shell script, and piping a URL into `bash` is worth being fussy
 about:
 
 ```sh
-curl -fsSL https://github.com/taladb/taladb/releases/latest/download/install.sh -o install.sh
+curl -fsSL https://github.com/tala-sh/taladb/releases/latest/download/install.sh -o install.sh
 less install.sh && bash install.sh
 ```
 :::
@@ -46,7 +46,7 @@ less install.sh && bash install.sh
 ```sh [From source]
 # any platform with a Rust toolchain — also the path for Linux arm64,
 # which has no prebuilt binary yet
-cargo install --git https://github.com/taladb/taladb taladb-cli
+cargo install --git https://github.com/tala-sh/taladb taladb-cli
 taladb --version
 ```
 
@@ -62,7 +62,7 @@ taladb --version
 #   taladb-aarch64-apple-darwin.tar.gz
 #   taladb-x86_64-apple-darwin.tar.gz
 #   taladb-x86_64-pc-windows-msvc.zip
-curl -fsSL https://github.com/taladb/taladb/releases/latest/download/taladb-aarch64-apple-darwin.tar.gz | tar -xz
+curl -fsSL https://github.com/tala-sh/taladb/releases/latest/download/taladb-aarch64-apple-darwin.tar.gz | tar -xz
 sudo mv taladb /usr/local/bin/
 taladb --version
 ```
@@ -369,4 +369,4 @@ The following commands are planned for a future release:
 | `taladb find-nearest ./myapp.db <collection> <field> <vector-json> --top 5` | Run a similarity query from the terminal |
 | `taladb drop-vector-index ./myapp.db <collection> <field>` | Remove a vector index |
 
-Track progress on the [GitHub issues page](https://github.com/taladb/taladb/issues).
+Track progress on the [GitHub issues page](https://github.com/tala-sh/taladb/issues).

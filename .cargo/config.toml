@@ -2,7 +2,19 @@
 runner = "wasm-bindgen-test-runner"
 # getrandom v0.3+ requires both the `wasm_js` feature AND this cfg flag
 # to select the JS backend on wasm32-unknown-unknown.
-rustflags = ['--cfg', 'getrandom_backend="wasm_js"']
+#
+# `+simd128` must live in this array, not in a `RUSTFLAGS` environment variable:
+# `RUSTFLAGS` *replaces* this list rather than merging with it, so setting the
+# feature that way silently drops the `getrandom_backend` cfg above and the
+# build fails inside `getrandom` with no mention of SIMD.
+#
+# The scoring reductions in `taladb-core::vector` are lane-split so LLVM can
+# vectorise them, but the wasm baseline has no vector instructions — without
+# this feature they compile scalar and the browser gets none of the benefit the
+# native targets get for free. Enabling it makes the module require WASM SIMD,
+# which sets the browser floor at Safari 16.4 / Chrome 91 / Firefox 89; see the
+# support table in `docs/guide/web.md`.
+rustflags = ['--cfg', 'getrandom_backend="wasm_js"', '-C', 'target-feature=+simd128']
 
 [alias]
 # `--release`, not `--profile release-wasm`: that profile was deliberately removed

@@ -137,13 +137,13 @@ await runMigrations(db, [
 
 ## Full Documentation
 
-**[https://taladb.github.io/taladb](https://taladb.github.io/taladb)**
+**[https://taladb.dev](https://taladb.dev)**
 
-- [Introduction](https://taladb.github.io/taladb/introduction)
-- [Web (Browser / WASM) Guide](https://taladb.github.io/taladb/guide/web)
-- [Node.js Guide](https://taladb.github.io/taladb/guide/node)
-- [React Native Guide](https://taladb.github.io/taladb/guide/react-native)
-- [API Reference](https://taladb.github.io/taladb/api/collection)
+- [Introduction](https://taladb.dev/introduction)
+- [Web (Browser / WASM) Guide](https://taladb.dev/guide/web)
+- [Node.js Guide](https://taladb.dev/guide/node)
+- [React Native Guide](https://taladb.dev/guide/react-native)
+- [API Reference](https://taladb.dev/api/collection)
 
 ## License
 

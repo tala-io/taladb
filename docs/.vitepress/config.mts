@@ -110,15 +110,15 @@ export default defineConfig({
         ],
       },
       {
-        text: "v0.11.7",
+        text: "v0.11.8",
         items: [
           {
             text: "Changelog",
-            link: "https://github.com/taladb/taladb/releases",
+            link: "https://github.com/tala-sh/taladb/releases",
           },
           {
             text: "Contributing",
-            link: "https://github.com/taladb/taladb/blob/main/CONTRIBUTING.md",
+            link: "https://github.com/tala-sh/taladb/blob/main/CONTRIBUTING.md",
           },
           {
             text: "npm",
@@ -176,8 +176,8 @@ export default defineConfig({
     ],
 
     socialLinks: [
-      { icon: "github", link: "https://github.com/taladb/taladb" },
-      { icon: "heart", link: "https://github.com/sponsors/taladb" },
+      { icon: "github", link: "https://github.com/tala-sh/taladb" },
+      { icon: "heart", link: "https://github.com/sponsors/tala-sh" },
     ],
 
     footer: {
@@ -185,16 +185,16 @@ export default defineConfig({
         <a href="/introduction">Docs</a> ·
         <a href="https://www.npmjs.com/package/taladb" target="_blank" rel="noopener">npm</a> ·
         <a href="/roadmap">Roadmap</a> ·
-        <a href="https://github.com/taladb/taladb/discussions" target="_blank" rel="noopener">Discussions</a> ·
-        <a href="https://github.com/taladb/taladb/releases" target="_blank" rel="noopener">Changelog</a> ·
-        <a href="https://github.com/sponsors/taladb" target="_blank" rel="noopener">Sponsor</a>
+        <a href="https://github.com/tala-sh/taladb/discussions" target="_blank" rel="noopener">Discussions</a> ·
+        <a href="https://github.com/tala-sh/taladb/releases" target="_blank" rel="noopener">Changelog</a> ·
+        <a href="https://github.com/sponsors/tala-sh" target="_blank" rel="noopener">Sponsor</a>
         <br/>Released under the Apache License 2.0.
       `,
       copyright: "Copyright &copy; 2025-2026 TalaDB",
     },
 
     editLink: {
-      pattern: "https://github.com/taladb/taladb/edit/main/docs/:path",
+      pattern: "https://github.com/tala-sh/taladb/edit/main/docs/:path",
       text: "Edit this page on GitHub",
     },
 

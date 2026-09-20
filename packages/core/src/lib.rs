@@ -143,6 +143,7 @@ pub struct Database {
     /// Decoded-vector cache for flat search, shared by every Collection handle
     /// from this Database (keyed by `collection::field`).
     vector_cache: vector::SharedVectorCache,
+    node_cache: vector_graph::SharedNodeCache,
 }
 
 impl Database {
@@ -210,6 +211,7 @@ impl Database {
             index_cache: collection::new_shared_index_cache(),
             watch_registries: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             vector_cache: vector::new_shared_vector_cache(),
+            node_cache: vector_graph::new_shared_node_cache(),
         })
     }
 
@@ -286,7 +288,8 @@ impl Database {
         let col = Collection::new(name, Arc::clone(&self.backend))
             .with_index_cache(Arc::clone(&self.index_cache))
             .with_watch_registry(registry)
-            .with_vector_cache(Arc::clone(&self.vector_cache));
+            .with_vector_cache(Arc::clone(&self.vector_cache))
+            .with_node_cache(Arc::clone(&self.node_cache));
         Ok(col)
     }
 

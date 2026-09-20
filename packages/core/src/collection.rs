@@ -169,6 +169,10 @@ pub struct Collection {
     /// write generation (see [`crate::watch`]). Always present because exact
     /// search remains available alongside HNSW on every platform.
     vector_cache: SharedVectorCache,
+    /// Decoded HNSW nodes, retained across queries and shared with every handle
+    /// from the same `Database`. Keyed by graph table, pinned to the vector
+    /// revision it was read at.
+    node_cache: crate::vector_graph::SharedNodeCache,
 }
 
 impl Collection {
@@ -182,6 +186,7 @@ impl Collection {
             #[cfg(feature = "encryption")]
             field_encryption: None,
             vector_cache: crate::vector::new_shared_vector_cache(),
+            node_cache: crate::vector_graph::new_shared_node_cache(),
         }
     }
 
@@ -237,6 +242,7 @@ impl Collection {
             #[cfg(feature = "encryption")]
             field_encryption: self.field_encryption.clone(),
             vector_cache: Arc::clone(&self.vector_cache),
+            node_cache: Arc::clone(&self.node_cache),
         }
     }
 
@@ -286,6 +292,34 @@ impl Collection {
     pub(crate) fn with_vector_cache(mut self, cache: SharedVectorCache) -> Self {
         self.vector_cache = cache;
         self
+    }
+
+    /// Attach the shared decoded-HNSW-node cache (called by
+    /// `Database::collection()` alongside `with_vector_cache`).
+    pub(crate) fn with_node_cache(mut self, cache: crate::vector_graph::SharedNodeCache) -> Self {
+        self.node_cache = cache;
+        self
+    }
+
+    /// Borrow the shared graph-node cache. `search_vectors` takes the entry out
+    /// for the duration of a query and puts it back, rather than holding the
+    /// lock across the search.
+    pub(crate) fn node_cache(&self) -> &crate::vector_graph::SharedNodeCache {
+        &self.node_cache
+    }
+
+    /// Drop retained graph nodes for a field's graph.
+    ///
+    /// Data writes invalidate through the vector revision, but `create`/`drop`/
+    /// rebuild rewrite the graph without bumping it — the same hole
+    /// `evict_vector_cache` exists to close for the flat path.
+    pub(crate) fn evict_node_cache(&self, field: &str) {
+        let table = crate::vector::hnsw_table_name(&self.name, field);
+        let mut cache = self
+            .node_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        cache.remove(&table);
     }
 
     /// Encrypt nominated fields in `doc` in-place, if field encryption is
@@ -1211,6 +1245,7 @@ impl Collection {
         wtxn.commit()?;
         self.invalidate_index_cache();
         self.evict_vector_cache(field);
+        self.evict_node_cache(field);
         Ok(())
     }
 
@@ -1251,6 +1286,7 @@ impl Collection {
         wtxn.commit()?;
         self.invalidate_index_cache();
         self.evict_vector_cache(field);
+        self.evict_node_cache(field);
         Ok(())
     }
 

@@ -1,6 +1,6 @@
 {
   "name": "@taladb/web",
-  "version": "0.11.7",
+  "version": "0.11.8",
   "description": "TalaDB WASM bindings — document queries and vector search in the browser",
   "main": "pkg/taladb_web.js",
   "types": "pkg/taladb_web.d.ts",
@@ -29,12 +29,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/taladb/taladb.git",
+    "url": "https://github.com/tala-sh/taladb.git",
     "directory": "packages/bindings/web"
   },
-  "homepage": "https://taladb.github.io/taladb/guide/web",
+  "homepage": "https://taladb.dev/guide/web",
   "bugs": {
-    "url": "https://github.com/taladb/taladb/issues"
+    "url": "https://github.com/tala-sh/taladb/issues"
   },
   "engines": {
     "node": ">=18"

@@ -1,6 +1,6 @@
 # taladb-core
 
-**The Rust engine behind [TalaDB](https://github.com/taladb/taladb) — an embedded
+**The Rust engine behind [TalaDB](https://github.com/tala-sh/taladb) — an embedded
 vector database for on-device AI.**
 
 Documents, structured queries, and vector similarity search in one embedded
@@ -9,7 +9,7 @@ Node.js. This crate is the engine itself; most applications consume it through a
 language binding rather than directly.
 
 - **Docs:** <https://taladb.dev>
-- **Repository:** <https://github.com/taladb/taladb>
+- **Repository:** <https://github.com/tala-sh/taladb>
 - **JavaScript packages:** [`taladb`](https://www.npmjs.com/package/taladb),
   [`@taladb/web`](https://www.npmjs.com/package/@taladb/web),
   [`@taladb/react`](https://www.npmjs.com/package/@taladb/react)

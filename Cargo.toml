@@ -9,12 +9,12 @@ members = [
 ]
 
 [workspace.package]
-version = "0.11.7"
+version = "0.11.8"
 edition = "2024"
 authors = ["taladb"]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/taladb/taladb"
-homepage = "https://github.com/taladb/taladb"
+repository = "https://github.com/tala-sh/taladb"
+homepage = "https://github.com/tala-sh/taladb"
 # Two things set this floor, and the higher one wins:
 #
 #   1.88  let-chains (`if let … && let …`) in edition 2024, which the query and
