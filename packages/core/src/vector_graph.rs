@@ -376,7 +376,9 @@ impl<'a> CacheLease<'a> {
 
 impl Drop for CacheLease<'_> {
     fn drop(&mut self) {
-        let Some(cache) = self.cache.take() else { return };
+        let Some(cache) = self.cache.take() else {
+            return;
+        };
         let mut map = self
             .shared
             .lock()
@@ -845,7 +847,10 @@ mod cache_lease_tests {
             );
         }
         let held = map.lock().unwrap();
-        assert!(held.contains_key("graph::docs::embedding"), "dropping must return it");
+        assert!(
+            held.contains_key("graph::docs::embedding"),
+            "dropping must return it"
+        );
         assert_eq!(held["graph::docs::embedding"].revision, 7);
     }
 
@@ -878,7 +883,10 @@ mod cache_lease_tests {
         drop(CacheLease::take(&map, "graph::docs::embedding", 1));
         // A rebuild moves the graph on; the old nodes must not come back.
         let mut lease = CacheLease::take(&map, "graph::docs::embedding", 2);
-        assert!(lease.cache_mut().is_empty(), "a different revision starts empty");
+        assert!(
+            lease.cache_mut().is_empty(),
+            "a different revision starts empty"
+        );
         drop(lease);
         assert_eq!(map.lock().unwrap()["graph::docs::embedding"].revision, 2);
     }
@@ -891,7 +899,10 @@ mod cache_lease_tests {
         // A rebuild through another handle evicts and repopulates at revision 2.
         map.lock().unwrap().insert(
             "graph::docs::embedding".to_string(),
-            CachedGraph { revision: 2, cache: NodeCache::default() },
+            CachedGraph {
+                revision: 2,
+                cache: NodeCache::default(),
+            },
         );
         drop(lease);
         assert_eq!(
