@@ -249,3 +249,4 @@ fn other_collections_are_not_invalidated_or_confused() {
     assert_eq!(ann(&other, &Q), exact(&other, &Q));
     assert!(other_before.iter().all(|l| l.starts_with("o-")));
 }
+

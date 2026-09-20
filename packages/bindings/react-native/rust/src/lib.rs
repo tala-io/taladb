@@ -2277,6 +2277,30 @@ fn parse_update(json: &str) -> Option<Update> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Serialises the tests that spawn jobs.
+    ///
+    /// `LIVE_JOBS` is a process-wide counter and the cap a process-wide limit,
+    /// so a test that fills the cap to prove the next spawn is refused is
+    /// asserting about a resource every other job test also consumes. Run in
+    /// parallel, another test holding a single permit means the cap never
+    /// fills, the "one past the cap" job is accepted, and the assertion fails —
+    /// roughly two runs in three on this machine, while passing every time in
+    /// isolation.
+    ///
+    /// A mutex around just these tests keeps the rest of the suite parallel.
+    /// `--test-threads=1` would fix it by making every test in the crate pay
+    /// for one test's need for exclusivity.
+    static JOB_SLOTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Held for the duration of any test that spawns jobs. Poisoning is
+    /// ignored: a panic in one job test should fail that test, not cascade
+    /// into every other one.
+    fn exclusive_jobs() -> std::sync::MutexGuard<'static, ()> {
+        JOB_SLOTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
     use super::*;
 
     #[test]
@@ -2366,6 +2390,7 @@ mod tests {
     /// span on `setImmediate` with no way to learn the job had died.
     #[test]
     fn a_panicking_job_still_completes_and_reports() {
+        let _slots = exclusive_jobs();
         let dir = tempfile::tempdir().unwrap();
         let path = CString::new(dir.path().join("job.db").to_str().unwrap()).unwrap();
         let handle = unsafe { taladb_open(path.as_ptr()) };
@@ -2497,6 +2522,7 @@ mod tests {
 
     #[test]
     fn a_successful_job_still_reports_its_result() {
+        let _slots = exclusive_jobs();
         // The guard must not change the happy path.
         let dir = tempfile::tempdir().unwrap();
         let path = CString::new(dir.path().join("job_ok.db").to_str().unwrap()).unwrap();
@@ -2535,6 +2561,7 @@ mod tests {
     /// more threads until the OS refuses one.
     #[test]
     fn starting_more_jobs_than_the_cap_is_refused_not_piled_up() {
+        let _slots = exclusive_jobs();
         let dir = tempfile::tempdir().unwrap();
         let path = CString::new(dir.path().join("cap.db").to_str().unwrap()).unwrap();
         let handle = unsafe { taladb_open(path.as_ptr()) };
@@ -2594,6 +2621,7 @@ mod tests {
     /// the pool.
     #[test]
     fn a_panicking_job_returns_its_permit() {
+        let _slots = exclusive_jobs();
         let dir = tempfile::tempdir().unwrap();
         let path = CString::new(dir.path().join("permit.db").to_str().unwrap()).unwrap();
         let handle = unsafe { taladb_open(path.as_ptr()) };
