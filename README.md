@@ -2,8 +2,8 @@
 
 <img src=".github/assets/tala-db-banner.png" alt="TalaDB" width="800" />
 
-**The embedded vector and document database for on-device AI.**<br/>
-Store documents, run structured queries, and search vectors in one Rust database — across the browser, Node.js, and React Native. No cloud required.
+**An open-source embedded vector and document database for building local-first AI applications.**<br/>
+Store documents, metadata, and vectors together. Query structured data and semantic similarity from one embedded database — across the browser, Node.js, and React Native. No cloud required.
 
 [![npm](https://img.shields.io/npm/v/taladb?label=npm)](https://www.npmjs.com/package/taladb)
 [![Status: Stable](https://img.shields.io/badge/Status-Stable-green)](https://github.com/tala-sh/taladb)
