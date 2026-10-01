@@ -22,7 +22,7 @@ taladb-core = { path = "..", features = ["encryption"] }
 # The JSON→Filter/Update parsers live in the bindings, not the core. This is the
 # one binding reachable from a fuzzer without a napi or wasm toolchain; the
 # `fuzzing` feature exposes its parsers and is off in shipping builds.
-taladb-ffi = { path = "../../bindings/react-native/rust", features = ["fuzzing"] }
+taladb-ffi = { path = "../../bindings/ffi", features = ["fuzzing"] }
 
 [[bin]]
 name = "fuzz_snapshot"

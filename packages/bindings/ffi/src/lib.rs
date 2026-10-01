@@ -1,4 +1,5 @@
-//! TalaDB C FFI layer for React Native JSI.
+//! TalaDB C FFI layer — the stable C interface behind the React Native, Swift
+//! and Kotlin bindings.
 //!
 //! All functions at this boundary follow these conventions:
 //!
@@ -10,8 +11,9 @@
 //! - Errors: string functions return `NULL` on error;
 //!   integer functions return `-1` on error.
 //!
-//! JSON is used at every boundary so the C++ HostObject only needs
-//! `JSON.stringify` / `JSON.parse` — no complex serialisation.
+//! JSON is used at every boundary so each binding only needs its platform's
+//! JSON encoder — `JSON.stringify` in the JSI HostObject, `Codable` in Swift,
+//! kotlinx.serialization in Kotlin — and no shared serialisation format.
 //!
 //! # Error reporting
 //!
@@ -49,8 +51,8 @@
 //! `unsafe_op_in_unsafe_fn` is denied below so an `unsafe extern "C" fn` body
 //! cannot quietly perform an unchecked dereference.
 
-// Safety contract is documented at the module level above; repeating it on all
-// 45 exported functions, which share it verbatim, would be noise. It does not
+// Safety contract is documented at the module level above; repeating it on
+// every exported function, which share it verbatim, would be noise. It does not
 // extend to `unsafe fn`s inside the crate — those document themselves.
 #![allow(clippy::missing_safety_doc)]
 #![deny(unsafe_op_in_unsafe_fn)]
@@ -109,6 +111,30 @@ pub extern "C" fn taladb_last_error() -> *const c_char {
 }
 
 // ---------------------------------------------------------------------------
+// ABI version
+// ---------------------------------------------------------------------------
+
+/// Version of the C interface in `taladb.h`. Bumped whenever an exported
+/// signature changes incompatibly, independently of the crate version.
+///
+/// - 1 — through 0.11.8.
+/// - 2 — the six index create/drop functions return `int32_t` instead of
+///   `void`; `taladb_call` and `taladb_ffi_abi_version` added.
+pub const TALADB_FFI_ABI_VERSION: u32 = 2;
+
+/// The [`TALADB_FFI_ABI_VERSION`] this library was built with.
+///
+/// The Swift and Kotlin packages live in their own repositories and load a
+/// prebuilt library, so the header they compiled against and the library they
+/// load can come from different releases. Each checks this once at load time
+/// and refuses to continue on a mismatch, because a changed signature links
+/// fine and then corrupts the stack at run time.
+#[unsafe(no_mangle)]
+pub extern "C" fn taladb_ffi_abi_version() -> u32 {
+    TALADB_FFI_ABI_VERSION
+}
+
+// ---------------------------------------------------------------------------
 // Opaque database handle
 // ---------------------------------------------------------------------------
 
@@ -116,6 +142,16 @@ pub extern "C" fn taladb_last_error() -> *const c_char {
 pub struct TalaDbHandle {
     db: Database,
 }
+
+// The native wrappers share one handle across threads (Swift tasks, Kotlin
+// coroutines on `Dispatchers.IO`) and call it concurrently. React Native never
+// did — it called from the JS thread and handed workers a clone — so nothing
+// enforced this until those wrappers existed. If a change to `Database` ever
+// drops `Sync`, this fails to compile instead of becoming a data race.
+const _: () = {
+    const fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<TalaDbHandle>();
+};
 
 impl TalaDbHandle {
     fn collection(&self, name: &str) -> Result<taladb_core::Collection, taladb_core::TalaDbError> {
@@ -914,133 +950,149 @@ pub unsafe extern "C" fn taladb_flush(handle: *mut TalaDbHandle) -> i32 {
 }
 
 // ---------------------------------------------------------------------------
+// Secondary, compound and full-text indexes
+//
+// All six return 1 on success and -1 on error. They returned `void` until ABI
+// version 2, and four of them discarded the core's error outright — so dropping
+// an index that did not exist "succeeded" here while the same call threw from
+// Node.js and from this binding's own async path.
+// ---------------------------------------------------------------------------
 
-/// Create a secondary index on `field`. No-op if already exists.
+/// Shared body of the index exports: resolve `handle` and `collection`, read
+/// `arg` (a field name or a JSON field list), and run `op` on the collection.
+///
+/// # Safety
+/// The pointer arguments follow the module-level contract: `handle` is live
+/// and both strings are null or valid NUL-terminated UTF-8.
+unsafe fn index_op(
+    handle: *mut TalaDbHandle,
+    collection: *const c_char,
+    arg: *const c_char,
+    op: impl FnOnce(&taladb_core::Collection, &str) -> Result<(), String>,
+) -> i32 {
+    ffi_guard(-1, move || {
+        clear_last_error();
+        let (h, col, arg) = match (
+            unsafe { ptr_to_ref(handle) },
+            unsafe { cstr_to_string(collection) },
+            unsafe { cstr_to_string(arg) },
+        ) {
+            (Some(h), Some(c), Some(a)) => (h, c, a),
+            // A helper rejected one of the pointers and set the message.
+            _ => return -1,
+        };
+        let result =
+            h.db.collection(&col)
+                .map_err(|e| e.to_string())
+                .and_then(|c| op(&c, &arg));
+        match result {
+            Ok(()) => 1,
+            Err(e) => {
+                set_last_error(e);
+                -1
+            }
+        }
+    })
+}
+
+/// Parse a compound index's `fields_json` (a JSON array of field names).
+fn compound_fields(fields_json: &str) -> Result<Vec<String>, String> {
+    serde_json::from_str(fields_json)
+        .map_err(|e| format!("fields must be a JSON array of field names: {e}"))
+}
+
+/// Create a secondary index on `field`. No-op if it already exists.
+/// Returns 1 on success, -1 on error.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn taladb_create_index(
     handle: *mut TalaDbHandle,
     collection: *const c_char,
     field: *const c_char,
-) {
-    ffi_guard((), move || {
-        clear_last_error();
-        if let (Some(h), Some(col), Some(f)) = (
-            unsafe { ptr_to_ref(handle) },
-            unsafe { cstr_to_string(collection) },
-            unsafe { cstr_to_string(field) },
-        ) && let Ok(c) = h.db.collection(&col)
-        {
-            let _ = c.create_index(&f);
-        }
-    })
+) -> i32 {
+    unsafe {
+        index_op(handle, collection, field, |c, f| {
+            c.create_index(f).map_err(|e| e.to_string())
+        })
+    }
 }
 
-/// Drop a secondary index on `field`.
+/// Drop a secondary index on `field`. Returns 1 on success, -1 on error
+/// (including when no such index exists).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn taladb_drop_index(
     handle: *mut TalaDbHandle,
     collection: *const c_char,
     field: *const c_char,
-) {
-    ffi_guard((), move || {
-        clear_last_error();
-        if let (Some(h), Some(col), Some(f)) = (
-            unsafe { ptr_to_ref(handle) },
-            unsafe { cstr_to_string(collection) },
-            unsafe { cstr_to_string(field) },
-        ) && let Ok(c) = h.db.collection(&col)
-        {
-            let _ = c.drop_index(&f);
-        }
-    })
+) -> i32 {
+    unsafe {
+        index_op(handle, collection, field, |c, f| {
+            c.drop_index(f).map_err(|e| e.to_string())
+        })
+    }
 }
 
 /// Create a compound index over `fields_json` (a JSON array of field names).
+/// Returns 1 on success, -1 on error.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn taladb_create_compound_index(
     handle: *mut TalaDbHandle,
     collection: *const c_char,
     fields_json: *const c_char,
-) {
-    ffi_guard((), move || {
-        clear_last_error();
-        if let (Some(h), Some(col), Some(fj)) = (
-            unsafe { ptr_to_ref(handle) },
-            unsafe { cstr_to_string(collection) },
-            unsafe { cstr_to_string(fields_json) },
-        ) && let Ok(fields) = serde_json::from_str::<Vec<String>>(&fj)
-            && let Ok(c) = h.db.collection(&col)
-        {
+) -> i32 {
+    unsafe {
+        index_op(handle, collection, fields_json, |c, fj| {
+            let fields = compound_fields(fj)?;
             let refs: Vec<&str> = fields.iter().map(String::as_str).collect();
-            if let Err(e) = c.create_compound_index(&refs) {
-                set_last_error(e.to_string());
-            }
-        }
-    })
+            c.create_compound_index(&refs).map_err(|e| e.to_string())
+        })
+    }
 }
 
 /// Drop a compound index by its ordered field list (`fields_json`).
+/// Returns 1 on success, -1 on error.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn taladb_drop_compound_index(
     handle: *mut TalaDbHandle,
     collection: *const c_char,
     fields_json: *const c_char,
-) {
-    ffi_guard((), move || {
-        clear_last_error();
-        if let (Some(h), Some(col), Some(fj)) = (
-            unsafe { ptr_to_ref(handle) },
-            unsafe { cstr_to_string(collection) },
-            unsafe { cstr_to_string(fields_json) },
-        ) && let Ok(fields) = serde_json::from_str::<Vec<String>>(&fj)
-            && let Ok(c) = h.db.collection(&col)
-        {
+) -> i32 {
+    unsafe {
+        index_op(handle, collection, fields_json, |c, fj| {
+            let fields = compound_fields(fj)?;
             let refs: Vec<&str> = fields.iter().map(String::as_str).collect();
-            if let Err(e) = c.drop_compound_index(&refs) {
-                set_last_error(e.to_string());
-            }
-        }
-    })
+            c.drop_compound_index(&refs).map_err(|e| e.to_string())
+        })
+    }
 }
 
-/// Create a full-text search index on `field`.
+/// Create a full-text search index on `field`. No-op if it already exists.
+/// Returns 1 on success, -1 on error.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn taladb_create_fts_index(
     handle: *mut TalaDbHandle,
     collection: *const c_char,
     field: *const c_char,
-) {
-    ffi_guard((), move || {
-        clear_last_error();
-        if let (Some(h), Some(col), Some(f)) = (
-            unsafe { ptr_to_ref(handle) },
-            unsafe { cstr_to_string(collection) },
-            unsafe { cstr_to_string(field) },
-        ) && let Ok(c) = h.db.collection(&col)
-        {
-            let _ = c.create_fts_index(&f);
-        }
-    })
+) -> i32 {
+    unsafe {
+        index_op(handle, collection, field, |c, f| {
+            c.create_fts_index(f).map_err(|e| e.to_string())
+        })
+    }
 }
 
-/// Drop a full-text search index on `field`.
+/// Drop a full-text search index on `field`. Returns 1 on success, -1 on
+/// error (including when no such index exists).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn taladb_drop_fts_index(
     handle: *mut TalaDbHandle,
     collection: *const c_char,
     field: *const c_char,
-) {
-    ffi_guard((), move || {
-        clear_last_error();
-        if let (Some(h), Some(col), Some(f)) = (
-            unsafe { ptr_to_ref(handle) },
-            unsafe { cstr_to_string(collection) },
-            unsafe { cstr_to_string(field) },
-        ) && let Ok(c) = h.db.collection(&col)
-        {
-            let _ = c.drop_fts_index(&f);
-        }
-    })
+) -> i32 {
+    unsafe {
+        index_op(handle, collection, field, |c, f| {
+            c.drop_fts_index(f).map_err(|e| e.to_string())
+        })
+    }
 }
 
 /// Rank documents against a free-text query using BM25 (OR semantics).
@@ -2113,18 +2165,65 @@ pub unsafe extern "C" fn taladb_call_start(
         }) else {
             return std::ptr::null_mut();
         };
-        if args.len() > 32 * 1024 * 1024 {
-            set_last_error("native request exceeds 32 MiB; split the batch".into());
+        if let Err(e) = check_call_size(&args) {
+            set_last_error(e);
             return std::ptr::null_mut();
         }
-        spawn_job(handle, move |h| {
-            let parsed: serde_json::Value =
-                serde_json::from_str(&args).map_err(|e| e.to_string())?;
-            taladb_core::json_depth::check_json_depth(&parsed).map_err(|e| e.to_string())?;
-            let args = parsed.as_array().ok_or("arguments must be an array")?;
-            async_dispatch::execute(h, &op, args).map(|v| v.to_string())
-        })
+        spawn_job(handle, move |h| execute_call(h, &op, &args))
     })
+}
+
+/// Run a JSON operation synchronously on the calling thread.
+///
+/// Takes the same `op` names and `args_json` array as [`taladb_call_start`]
+/// and returns the result JSON directly, or NULL on error (see
+/// `taladb_last_error`). Caller must free the result with `taladb_free_string`.
+///
+/// For callers that do their own threading — the Swift and Kotlin packages run
+/// it on a background executor — this reaches every operation in the dispatch
+/// table, including ones with no dedicated export (`listIndexes`,
+/// `vectorCommand`), without a job handle to poll.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn taladb_call(
+    handle: *mut TalaDbHandle,
+    op: *const c_char,
+    args_json: *const c_char,
+) -> *mut c_char {
+    ffi_guard(std::ptr::null_mut(), move || {
+        clear_last_error();
+        let (Some(h), Some(op), Some(args)) = (
+            unsafe { ptr_to_ref(handle) },
+            unsafe { cstr_to_string(op) },
+            unsafe { cstr_to_string(args_json) },
+        ) else {
+            return std::ptr::null_mut();
+        };
+        match check_call_size(&args).and_then(|()| execute_call(h, &op, &args)) {
+            Ok(json) => to_cstring(json),
+            Err(e) => {
+                set_last_error(e);
+                std::ptr::null_mut()
+            }
+        }
+    })
+}
+
+/// Reject an oversized request before parsing it, so one call cannot pin an
+/// unbounded JSON tree in memory.
+fn check_call_size(args_json: &str) -> Result<(), String> {
+    if args_json.len() > 32 * 1024 * 1024 {
+        return Err("native request exceeds 32 MiB; split the batch".into());
+    }
+    Ok(())
+}
+
+/// Parse `args_json` and run `op` from the dispatch table. Shared by the
+/// synchronous [`taladb_call`] and the background [`taladb_call_start`].
+fn execute_call(h: &TalaDbHandle, op: &str, args_json: &str) -> Result<String, String> {
+    let parsed: serde_json::Value = serde_json::from_str(args_json).map_err(|e| e.to_string())?;
+    taladb_core::json_depth::check_json_depth(&parsed).map_err(|e| e.to_string())?;
+    let args = parsed.as_array().ok_or("arguments must be an array")?;
+    async_dispatch::execute(h, op, args).map(|v| v.to_string())
 }
 
 /// Start a `find_nearest` in a background thread. Returns a job handle, or
@@ -2423,6 +2522,7 @@ mod tests {
 
     #[test]
     fn async_dispatch_commits_reports_indexes_and_rejects_bad_batches() {
+        let _slots = exclusive_jobs();
         let (handle, _dir) = open_temp_db();
         let invoke = |op: &str, args: &str| -> Result<serde_json::Value, String> {
             let op = cstr(op);
@@ -2467,6 +2567,7 @@ mod tests {
 
     #[test]
     fn mobile_vector_commands_build_search_cancel_and_measure_recall() {
+        let _slots = exclusive_jobs();
         let (handle, _dir) = open_temp_db();
         let invoke = |request: serde_json::Value| -> serde_json::Value {
             let op = cstr("vectorCommand");
@@ -2811,6 +2912,175 @@ mod tests {
         CString::new(s).unwrap()
     }
 
+    /// Copy a returned C string into an owned `String` and free it.
+    fn take_string(ptr: *mut c_char) -> Option<String> {
+        if ptr.is_null() {
+            return None;
+        }
+        let s = unsafe { CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .into_owned();
+        unsafe { taladb_free_string(ptr) };
+        Some(s)
+    }
+
+    #[test]
+    fn abi_version_matches_the_exported_constant() {
+        assert_eq!(taladb_ffi_abi_version(), TALADB_FFI_ABI_VERSION);
+    }
+
+    /// Before ABI version 2 these returned `void` and discarded the core's
+    /// error, so dropping a missing index "succeeded" here while it threw from
+    /// Node.js and from this binding's own async path.
+    #[test]
+    fn index_exports_report_core_errors() {
+        let (h, _dir) = open_temp_db();
+        let col = cstr("users");
+        let field = cstr("email");
+
+        assert_eq!(
+            unsafe { taladb_create_index(h, col.as_ptr(), field.as_ptr()) },
+            1
+        );
+        assert!(last_error().is_none());
+        // Creating an existing index is still a no-op success.
+        assert_eq!(
+            unsafe { taladb_create_index(h, col.as_ptr(), field.as_ptr()) },
+            1
+        );
+        assert_eq!(
+            unsafe { taladb_drop_index(h, col.as_ptr(), field.as_ptr()) },
+            1
+        );
+
+        assert_eq!(
+            unsafe { taladb_drop_index(h, col.as_ptr(), field.as_ptr()) },
+            -1
+        );
+        assert!(last_error().is_some(), "a missing index must set a message");
+        assert_eq!(
+            unsafe { taladb_drop_fts_index(h, col.as_ptr(), field.as_ptr()) },
+            -1
+        );
+        assert!(last_error().is_some());
+
+        assert_eq!(
+            unsafe { taladb_create_fts_index(h, col.as_ptr(), field.as_ptr()) },
+            1
+        );
+        assert_eq!(
+            unsafe { taladb_drop_fts_index(h, col.as_ptr(), field.as_ptr()) },
+            1
+        );
+
+        unsafe { taladb_close(h) };
+    }
+
+    #[test]
+    fn compound_index_rejects_a_malformed_field_list_with_a_message() {
+        let (h, _dir) = open_temp_db();
+        let col = cstr("users");
+
+        let bad = cstr(r#"{"not":"an array"}"#);
+        assert_eq!(
+            unsafe { taladb_create_compound_index(h, col.as_ptr(), bad.as_ptr()) },
+            -1
+        );
+        let msg = last_error().expect("a malformed field list must set a message");
+        assert!(msg.contains("JSON array"), "{msg}");
+
+        let fields = cstr(r#"["last","first"]"#);
+        assert_eq!(
+            unsafe { taladb_create_compound_index(h, col.as_ptr(), fields.as_ptr()) },
+            1
+        );
+        assert_eq!(
+            unsafe { taladb_drop_compound_index(h, col.as_ptr(), fields.as_ptr()) },
+            1
+        );
+
+        unsafe { taladb_close(h) };
+    }
+
+    /// `taladb_call` reaches dispatch-table ops that have no dedicated export.
+    #[test]
+    fn call_runs_dispatch_ops_synchronously() {
+        let (h, _dir) = open_temp_db();
+        let col = cstr("users");
+        let field = cstr("email");
+        assert_eq!(
+            unsafe { taladb_create_index(h, col.as_ptr(), field.as_ptr()) },
+            1
+        );
+
+        let op = cstr("listIndexes");
+        let args = cstr(r#"["users"]"#);
+        let out = take_string(unsafe { taladb_call(h, op.as_ptr(), args.as_ptr()) })
+            .unwrap_or_else(|| panic!("listIndexes failed: {:?}", last_error()));
+        let indexes: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(indexes["btree"], serde_json::json!(["email"]), "{out}");
+
+        let op = cstr("insert");
+        let args = cstr(r#"["users",{"email":"a@b.c"}]"#);
+        let id = take_string(unsafe { taladb_call(h, op.as_ptr(), args.as_ptr()) })
+            .unwrap_or_else(|| panic!("insert failed: {:?}", last_error()));
+        assert!(id.starts_with('"'), "insert returns a JSON string id: {id}");
+
+        unsafe { taladb_close(h) };
+    }
+
+    #[test]
+    fn call_reports_unknown_ops_and_bad_arguments() {
+        let (h, _dir) = open_temp_db();
+
+        let op = cstr("noSuchOp");
+        let args = cstr(r#"["users"]"#);
+        assert!(take_string(unsafe { taladb_call(h, op.as_ptr(), args.as_ptr()) }).is_none());
+        assert!(last_error().unwrap().contains("noSuchOp"));
+
+        let op = cstr("count");
+        let args = cstr(r#"{"not":"an array"}"#);
+        assert!(take_string(unsafe { taladb_call(h, op.as_ptr(), args.as_ptr()) }).is_none());
+        assert!(last_error().unwrap().contains("array"));
+
+        // A null handle is rejected before anything is parsed.
+        let null = std::ptr::null_mut();
+        assert!(take_string(unsafe { taladb_call(null, op.as_ptr(), args.as_ptr()) }).is_none());
+        assert!(last_error().is_some());
+
+        unsafe { taladb_close(h) };
+    }
+
+    /// The Swift and Kotlin wrappers call one handle from many threads at once.
+    #[test]
+    fn one_handle_serves_concurrent_threads() {
+        let (h, _dir) = open_temp_db();
+        // Raw pointers are not `Send`; the address is, and the handle itself is
+        // `Sync` (asserted at compile time next to its definition).
+        let addr = h as usize;
+        let threads: Vec<_> = (0..8)
+            .map(|t| {
+                std::thread::spawn(move || {
+                    let h = addr as *mut TalaDbHandle;
+                    let col = cstr("events");
+                    for i in 0..25 {
+                        let doc = cstr(&format!(r#"{{"thread":{t},"i":{i}}}"#));
+                        let id =
+                            take_string(unsafe { taladb_insert(h, col.as_ptr(), doc.as_ptr()) });
+                        assert!(id.is_some(), "insert failed: {:?}", last_error());
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().expect("worker thread");
+        }
+        let col = cstr("events");
+        let all = cstr("{}");
+        assert_eq!(unsafe { taladb_count(h, col.as_ptr(), all.as_ptr()) }, 200);
+        unsafe { taladb_close(h) };
+    }
+
     /// A reopened database has an empty HNSW cache, and nothing in the FFI could
     /// refill it — so every `taladb_find_nearest` after a restart silently took
     /// the exact path and scanned the whole vector table.
@@ -2884,6 +3154,7 @@ mod tests {
     /// supported API even when the direct export exists.
     #[test]
     fn rebuild_hnsw_indexes_is_reachable_through_async_dispatch() {
+        let _slots = exclusive_jobs();
         let (handle, _dir) = open_temp_db();
         let op = cstr("rebuildVectorIndexes");
         let args = cstr("[]");
@@ -3157,8 +3428,11 @@ mod miri_safe {
         // i64
         assert_eq!(unsafe { taladb_user_version(std::ptr::null_mut()) }, -1);
 
-        // ()
-        unsafe { taladb_create_index(std::ptr::null_mut(), col.as_ptr(), col.as_ptr()) };
+        // i32 (was `()` before ABI version 2)
+        assert_eq!(
+            unsafe { taladb_create_index(std::ptr::null_mut(), col.as_ptr(), col.as_ptr()) },
+            -1
+        );
 
         // *mut TalaDbHandle / *mut TalaDbJob
         assert!(unsafe { taladb_open(std::ptr::null()) }.is_null());

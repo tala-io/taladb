@@ -5,7 +5,7 @@ members = [
     "packages/bindings/web",
     "packages/bindings/node",
     "packages/tools/cli",
-    "packages/bindings/react-native/rust",
+    "packages/bindings/ffi",
 ]
 
 [workspace.package]

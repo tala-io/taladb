@@ -5,7 +5,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PACKAGE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-RUST_DIR="$PACKAGE_DIR/rust"
+RUST_DIR="$PACKAGE_DIR/../ffi"
 JNI_LIBS="$PACKAGE_DIR/android/src/main/jniLibs"
 
 ABIS=("arm64-v8a" "armeabi-v7a" "x86_64")
