@@ -45,7 +45,9 @@
  *
  * - 1 — through 0.11.8.
  * - 2 — the six index create/drop functions return `int32_t` instead of
- *   `void`; `taladb_call` and `taladb_ffi_abi_version` added.
+ *   `void`; `taladb_call`, `taladb_ffi_abi_version` and the live-query
+ *   functions (`taladb_watch`, `taladb_watch_next`, `taladb_watch_close`)
+ *   added.
  */
 #define TALADB_FFI_ABI_VERSION 2
 
@@ -55,6 +57,12 @@ typedef struct TalaDbHandle TalaDbHandle;
  * A background job handle. Opaque to the caller.
  */
 typedef struct TalaDbJob TalaDbJob;
+
+/**
+ * A live query: a subscription to the documents in one collection that match
+ * one filter. Opaque to the caller.
+ */
+typedef struct TalaDbWatch TalaDbWatch;
 
 #ifdef __cplusplus
 extern "C" {
@@ -418,6 +426,41 @@ struct TalaDbJob *taladb_call_start(struct TalaDbHandle *handle,
  * `vectorCommand`), without a job handle to poll.
  */
 char *taladb_call(struct TalaDbHandle *handle, const char *op, const char *args_json);
+
+/**
+ * Subscribe to the documents in `collection` matching `filter_json` (NULL,
+ * `"{}"` or `"null"` for all).
+ *
+ * Writes made through any handle of the same database wake the watch. It
+ * delivers no initial snapshot — read the current state with `taladb_find`
+ * *after* this returns, so no write can fall between the two.
+ *
+ * The watch reads from the database it was created on and keeps its storage
+ * open until `taladb_watch_close`, even after `taladb_close`. Returns NULL on
+ * error.
+ */
+struct TalaDbWatch *taladb_watch(struct TalaDbHandle *handle,
+                                 const char *collection,
+                                 const char *filter_json);
+
+/**
+ * Wait up to `timeout_ms` for a write to the watched collection.
+ *
+ * Returns 1 and sets `*out_json` to a JSON array of the matching documents
+ * (free with `taladb_free_string`) if a write occurred — several writes since
+ * the last call coalesce into one snapshot of the latest state. Returns 0 and
+ * sets `*out_json` to NULL on timeout, and -1 on error.
+ *
+ * The timeout is what lets a caller stop a subscription: loop on this with a
+ * short timeout and check for cancellation between calls. Do not call
+ * `taladb_watch_close` while a call on the same watch is in progress.
+ */
+int32_t taladb_watch_next(struct TalaDbWatch *watch, uint32_t timeout_ms, char **out_json);
+
+/**
+ * Close a watch and release the storage it holds open. NULL is a no-op.
+ */
+void taladb_watch_close(struct TalaDbWatch *watch);
 
 /**
  * Start a `find_nearest` in a background thread. Returns a job handle, or

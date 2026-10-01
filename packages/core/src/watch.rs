@@ -11,10 +11,10 @@
 //! MPSC channel, re-runs the query, and delivers the new snapshot to the caller.
 //!
 //! Non-blocking by default: if the caller does not consume events fast enough
-//! the channel queue grows up to `CHANNEL_CAPACITY` and then the oldest event
-//! is dropped (lossy). The handle is always re-queried at receive time so no
-//! documents are ever silently skipped — the worst that happens is that two
-//! rapid writes coalesce into one snapshot.
+//! the channel queue grows up to `CHANNEL_CAPACITY` and further events are
+//! discarded. The handle is always re-queried at receive time so no documents
+//! are ever silently skipped — the worst that happens is that rapid writes
+//! coalesce into one snapshot.
 
 use std::sync::{Arc, Mutex};
 
@@ -57,11 +57,13 @@ impl WatchRegistry {
         self.generation = self.generation.wrapping_add(1);
         self.senders.retain(|tx| match tx.try_send(WriteEvent) {
             Ok(()) => true,
-            Err(std::sync::mpsc::TrySendError::Full(_)) => {
-                // Subscriber is too slow to consume events; drop it (WatchBackpressure).
-                tracing::warn!("taladb: watch subscriber dropped: channel full (backpressure)");
-                false
-            }
+            // A full channel already holds wake-ups for this subscriber, and
+            // events carry no payload — the receiver re-runs its query — so
+            // the extra event is redundant, not lost. This used to drop the
+            // subscriber instead, which ended a live query after any burst of
+            // more than CHANNEL_CAPACITY writes its consumer had not caught
+            // up with.
+            Err(std::sync::mpsc::TrySendError::Full(_)) => true,
             Err(std::sync::mpsc::TrySendError::Disconnected(_)) => false,
         });
     }
@@ -114,6 +116,26 @@ impl WatchHandle {
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => Ok(None),
             Err(std::sync::mpsc::TryRecvError::Disconnected) => Err(TalaDbError::WatchClosed),
+        }
+    }
+
+    /// Wait at most `timeout` for a write, then return the fresh snapshot, or
+    /// `None` if none occurred.
+    ///
+    /// For callers that must stay responsive while waiting — the native
+    /// bindings loop on this so a cancelled subscription is noticed within one
+    /// timeout, where `next()` would block until the next write.
+    pub fn next_timeout(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<Option<Vec<Document>>, TalaDbError> {
+        match self.rx.recv_timeout(timeout) {
+            Ok(_) => {
+                while self.rx.try_recv().is_ok() {}
+                Ok(Some((self.query_fn)(&self.filter)?))
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Ok(None),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(TalaDbError::WatchClosed),
         }
     }
 

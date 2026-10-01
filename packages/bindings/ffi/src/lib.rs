@@ -119,7 +119,9 @@ pub extern "C" fn taladb_last_error() -> *const c_char {
 ///
 /// - 1 — through 0.11.8.
 /// - 2 — the six index create/drop functions return `int32_t` instead of
-///   `void`; `taladb_call` and `taladb_ffi_abi_version` added.
+///   `void`; `taladb_call`, `taladb_ffi_abi_version` and the live-query
+///   functions (`taladb_watch`, `taladb_watch_next`, `taladb_watch_close`)
+///   added.
 pub const TALADB_FFI_ABI_VERSION: u32 = 2;
 
 /// The [`TALADB_FFI_ABI_VERSION`] this library was built with.
@@ -1255,8 +1257,15 @@ pub unsafe extern "C" fn taladb_hybrid_search(
 /// A malformed filter is an error rather than "no filter" — silently
 /// widening a query is how a scoped search turns into a full scan.
 fn optional_filter(filter_json: *const c_char) -> Result<Option<Filter>, String> {
-    let Some(s) = (unsafe { cstr_to_string(filter_json) }) else {
+    // NULL is "no filter". Checked here rather than left to `cstr_to_string`,
+    // which reports NULL as a missing required argument: that left an error
+    // message behind on a call that succeeded, and treated a filter that was
+    // present but not UTF-8 as no filter at all — matching every document.
+    if filter_json.is_null() {
         return Ok(None);
+    }
+    let Some(s) = (unsafe { cstr_to_string(filter_json) }) else {
+        return Err("filter is not valid UTF-8".into());
     };
     if s.is_empty() || s == "null" || s == "{}" {
         return Ok(None);
@@ -2208,6 +2217,122 @@ pub unsafe extern "C" fn taladb_call(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Live queries
+// ---------------------------------------------------------------------------
+
+/// A live query: a subscription to the documents in one collection that match
+/// one filter. Opaque to the caller.
+pub struct TalaDbWatch {
+    // `WatchHandle` holds an mpsc receiver, which is `Send` but not `Sync`.
+    // The mutex makes concurrent `taladb_watch_next` calls on one watch
+    // serialise instead of racing on the receiver.
+    inner: Mutex<taladb_core::watch::WatchHandle>,
+}
+
+/// Subscribe to the documents in `collection` matching `filter_json` (NULL,
+/// `"{}"` or `"null"` for all).
+///
+/// Writes made through any handle of the same database wake the watch. It
+/// delivers no initial snapshot — read the current state with `taladb_find`
+/// *after* this returns, so no write can fall between the two.
+///
+/// The watch reads from the database it was created on and keeps its storage
+/// open until `taladb_watch_close`, even after `taladb_close`. Returns NULL on
+/// error.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn taladb_watch(
+    handle: *mut TalaDbHandle,
+    collection: *const c_char,
+    filter_json: *const c_char,
+) -> *mut TalaDbWatch {
+    ffi_guard(std::ptr::null_mut(), move || {
+        clear_last_error();
+        let (Some(h), Some(col)) = (unsafe { ptr_to_ref(handle) }, unsafe {
+            cstr_to_string(collection)
+        }) else {
+            return std::ptr::null_mut();
+        };
+        let filter = match optional_filter(filter_json) {
+            Ok(f) => f.unwrap_or(Filter::All),
+            Err(e) => {
+                set_last_error(e);
+                return std::ptr::null_mut();
+            }
+        };
+        match h.db.collection(&col) {
+            Ok(c) => Box::into_raw(Box::new(TalaDbWatch {
+                inner: Mutex::new(c.watch(filter)),
+            })),
+            Err(e) => {
+                set_last_error(e.to_string());
+                std::ptr::null_mut()
+            }
+        }
+    })
+}
+
+/// Wait up to `timeout_ms` for a write to the watched collection.
+///
+/// Returns 1 and sets `*out_json` to a JSON array of the matching documents
+/// (free with `taladb_free_string`) if a write occurred — several writes since
+/// the last call coalesce into one snapshot of the latest state. Returns 0 and
+/// sets `*out_json` to NULL on timeout, and -1 on error.
+///
+/// The timeout is what lets a caller stop a subscription: loop on this with a
+/// short timeout and check for cancellation between calls. Do not call
+/// `taladb_watch_close` while a call on the same watch is in progress.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn taladb_watch_next(
+    watch: *mut TalaDbWatch,
+    timeout_ms: u32,
+    out_json: *mut *mut c_char,
+) -> i32 {
+    ffi_guard(-1, move || {
+        clear_last_error();
+        if out_json.is_null() {
+            set_last_error("out_json is null".into());
+            return -1;
+        }
+        // SAFETY: non-null, and the caller provides a writable `char *` slot.
+        unsafe { *out_json = std::ptr::null_mut() };
+        // SAFETY: NULL or a live watch from `taladb_watch`, per the contract.
+        let Some(w) = (unsafe { watch.as_ref() }) else {
+            set_last_error("watch handle is null".into());
+            return -1;
+        };
+        let handle = w
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match handle.next_timeout(std::time::Duration::from_millis(timeout_ms.into())) {
+            Ok(Some(docs)) => {
+                let json = serde_json::Value::Array(docs.iter().map(doc_to_json).collect());
+                // SAFETY: as above.
+                unsafe { *out_json = to_cstring(json.to_string()) };
+                1
+            }
+            Ok(None) => 0,
+            Err(e) => {
+                set_last_error(e.to_string());
+                -1
+            }
+        }
+    })
+}
+
+/// Close a watch and release the storage it holds open. NULL is a no-op.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn taladb_watch_close(watch: *mut TalaDbWatch) {
+    ffi_guard((), move || {
+        clear_last_error();
+        if !watch.is_null() {
+            // SAFETY: a pointer from `taladb_watch`, closed exactly once.
+            drop(unsafe { Box::from_raw(watch) });
+        }
+    })
+}
+
 /// Reject an oversized request before parsing it, so one call cannot pin an
 /// unbounded JSON tree in memory.
 fn check_call_size(args_json: &str) -> Result<(), String> {
@@ -3048,6 +3173,115 @@ mod tests {
         assert!(take_string(unsafe { taladb_call(null, op.as_ptr(), args.as_ptr()) }).is_none());
         assert!(last_error().is_some());
 
+        unsafe { taladb_close(h) };
+    }
+
+    #[test]
+    fn watch_delivers_coalesced_snapshots_and_times_out_quietly() {
+        let (h, _dir) = open_temp_db();
+        let col = cstr("todos");
+        let open = cstr(r#"{"done":false}"#);
+        let w = unsafe { taladb_watch(h, col.as_ptr(), open.as_ptr()) };
+        assert!(!w.is_null(), "{:?}", last_error());
+
+        let mut out: *mut c_char = std::ptr::null_mut();
+        assert_eq!(unsafe { taladb_watch_next(w, 10, &mut out) }, 0);
+        assert!(out.is_null());
+        assert!(last_error().is_none(), "a timeout is not an error");
+
+        for doc in [r#"{"t":"a","done":false}"#, r#"{"t":"b","done":true}"#] {
+            let doc = cstr(doc);
+            assert!(take_string(unsafe { taladb_insert(h, col.as_ptr(), doc.as_ptr()) }).is_some());
+        }
+        assert_eq!(unsafe { taladb_watch_next(w, 1000, &mut out) }, 1);
+        let docs: serde_json::Value = serde_json::from_str(&take_string(out).unwrap()).unwrap();
+        assert_eq!(docs.as_array().unwrap().len(), 1, "filter applied: {docs}");
+        assert_eq!(docs[0]["t"], "a");
+
+        // Both inserts coalesced into the one snapshot above.
+        assert_eq!(unsafe { taladb_watch_next(w, 10, &mut out) }, 0);
+
+        unsafe { taladb_watch_close(w) };
+        unsafe { taladb_close(h) };
+    }
+
+    #[test]
+    fn watch_rejects_bad_arguments_with_a_message() {
+        let (h, _dir) = open_temp_db();
+        let col = cstr("todos");
+        let bad = cstr(r#"{"x":{"$nope":1}}"#);
+        assert!(unsafe { taladb_watch(h, col.as_ptr(), bad.as_ptr()) }.is_null());
+        assert!(last_error().is_some());
+
+        let mut out: *mut c_char = std::ptr::null_mut();
+        assert_eq!(
+            unsafe { taladb_watch_next(std::ptr::null_mut(), 0, &mut out) },
+            -1
+        );
+        assert!(last_error().is_some());
+        unsafe { taladb_watch_close(std::ptr::null_mut()) };
+        unsafe { taladb_close(h) };
+    }
+
+    /// A NULL filter is "no filter" and must not leave an error behind; a
+    /// filter that is present but not UTF-8 must fail, not match everything.
+    #[test]
+    fn optional_filters_distinguish_absent_from_malformed() {
+        let (h, _dir) = open_temp_db();
+        let col = cstr("docs");
+        let field = cstr("v");
+        assert_eq!(
+            unsafe {
+                taladb_create_vector_index(
+                    h,
+                    col.as_ptr(),
+                    field.as_ptr(),
+                    2,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                )
+            },
+            1
+        );
+        let doc = cstr(r#"{"v":[1.0,0.0]}"#);
+        assert!(take_string(unsafe { taladb_insert(h, col.as_ptr(), doc.as_ptr()) }).is_some());
+        let q = [1.0f32, 0.0];
+
+        let hits = take_string(unsafe {
+            taladb_find_nearest(
+                h,
+                col.as_ptr(),
+                field.as_ptr(),
+                q.as_ptr(),
+                2,
+                5,
+                std::ptr::null(),
+            )
+        });
+        assert!(hits.is_some());
+        assert!(
+            last_error().is_none(),
+            "success must leave no error: {:?}",
+            last_error()
+        );
+
+        let not_utf8 = [0xffu8, 0xfe, 0x00];
+        let hits = take_string(unsafe {
+            taladb_find_nearest(
+                h,
+                col.as_ptr(),
+                field.as_ptr(),
+                q.as_ptr(),
+                2,
+                5,
+                not_utf8.as_ptr().cast(),
+            )
+        });
+        assert!(
+            hits.is_none(),
+            "a malformed filter must not match everything"
+        );
+        assert!(last_error().is_some());
         unsafe { taladb_close(h) };
     }
 
