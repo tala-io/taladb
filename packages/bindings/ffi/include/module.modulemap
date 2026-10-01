@@ -1,0 +1,6 @@
+// Clang module for the C FFI, so Swift can `import TalaDBFFI`. Shipped in the
+// Headers of the Swift package's TalaDBFFI.xcframework beside taladb.h.
+module TalaDBFFI {
+    header "taladb.h"
+    export *
+}
