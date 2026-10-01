@@ -411,6 +411,12 @@ jobs:
           cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 \
             -o ../react-native/android/src/main/jniLibs \
             build --release
+          # `-o` copies every cdylib in the build — including
+          # libredb-<hash>.so, because redb 2.x (the legacy-migration
+          # dependency) declares a cdylib crate type. libtaladb_ffi.so links
+          # redb statically and never loads it, so it only added ~500 KB per
+          # 64-bit ABI to every app.
+          find ../react-native/android/src/main/jniLibs -name '*.so' ! -name libtaladb_ffi.so -print -delete
 
       # Google Play rejects apps whose 64-bit libraries are not 16 KB aligned,
       # and a 16 KB-page device cannot load them at all. The flag lives in
