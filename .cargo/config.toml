@@ -31,3 +31,27 @@ rustflags = ['--cfg', 'getrandom_backend="wasm_js"', '-C', 'target-feature=+simd
 # ships: `wasm-pack build packages/bindings/web --target web --release` is, and
 # only that applies the `wasm-opt` flags from the web crate's manifest.
 wasm = "build -p taladb-web --target wasm32-unknown-unknown --release"
+
+# 16 KB page alignment for the Android shared library (libtaladb_ffi.so).
+#
+# Google Play requires 16 KB support from every app targeting Android 15 or
+# later, and a device with 16 KB pages cannot load a library whose LOAD
+# segments are 4 KB aligned. rustc's Android target specs set no page size, so
+# the result otherwise rests on whatever the linker driver supplies — the
+# release build has come out aligned, but NDK r27, which it pins, defaults to
+# 4 KB on its own. Stating it here makes the alignment independent of the
+# cargo-ndk and NDK versions in use. The JSI glue sets the same flag in
+# `packages/bindings/react-native/android/CMakeLists.txt`; this covers the Rust
+# library underneath it, which the React Native and Kotlin packages both ship.
+# The release workflow asserts the result with readelf.
+#
+# Aligning to 16 KB is harmless on 4 KB devices. armeabi-v7a is included for
+# uniformity even though 16 KB pages are a 64-bit-only requirement.
+[target.aarch64-linux-android]
+rustflags = ['-C', 'link-arg=-Wl,-z,max-page-size=16384']
+
+[target.x86_64-linux-android]
+rustflags = ['-C', 'link-arg=-Wl,-z,max-page-size=16384']
+
+[target.armv7-linux-androideabi]
+rustflags = ['-C', 'link-arg=-Wl,-z,max-page-size=16384']

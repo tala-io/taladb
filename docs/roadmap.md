@@ -6,11 +6,11 @@ description: Planned and in-progress features for TalaDB
 # Roadmap
 
 What's planned for TalaDB, roughly in order of impact. Shipped work is recorded
-in the [changelog](https://github.com/tala-sh/taladb/blob/main/CHANGELOG.md);
+in the [changelog](https://github.com/tala-io/taladb/blob/main/CHANGELOG.md);
 this page tracks only what's still open.
 
 Have an idea, or want to help prioritise? Open a
-[GitHub Discussion](https://github.com/tala-sh/taladb/discussions) or a feature
+[GitHub Discussion](https://github.com/tala-io/taladb/discussions) or a feature
 request issue.
 
 ---

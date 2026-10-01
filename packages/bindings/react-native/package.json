@@ -8,7 +8,7 @@
     "typecheck": "tsc --noEmit",
     "build:ios": "sh scripts/build-ios.sh",
     "build:android": "sh scripts/build-android.sh",
-    "build:cbindgen": "cd rust && cbindgen --config cbindgen.toml --crate taladb-ffi --output ../cpp/taladb.h"
+    "build:cbindgen": "../ffi/scripts/gen-header.sh"
   },
   "files": [
     "LICENSE-APACHE",
@@ -31,12 +31,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/tala-sh/taladb.git",
+    "url": "https://github.com/tala-io/taladb.git",
     "directory": "packages/bindings/react-native"
   },
   "homepage": "https://taladb.dev/guide/react-native",
   "bugs": {
-    "url": "https://github.com/tala-sh/taladb/issues"
+    "url": "https://github.com/tala-io/taladb/issues"
   },
   "engines": {
     "node": ">=18"

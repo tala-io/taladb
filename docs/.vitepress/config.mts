@@ -114,11 +114,11 @@ export default defineConfig({
         items: [
           {
             text: "Changelog",
-            link: "https://github.com/tala-sh/taladb/releases",
+            link: "https://github.com/tala-io/taladb/releases",
           },
           {
             text: "Contributing",
-            link: "https://github.com/tala-sh/taladb/blob/main/CONTRIBUTING.md",
+            link: "https://github.com/tala-io/taladb/blob/main/CONTRIBUTING.md",
           },
           {
             text: "npm",
@@ -176,7 +176,7 @@ export default defineConfig({
     ],
 
     socialLinks: [
-      { icon: "github", link: "https://github.com/tala-sh/taladb" },
+      { icon: "github", link: "https://github.com/tala-io/taladb" },
       { icon: "heart", link: "https://github.com/sponsors/tala-sh" },
     ],
 
@@ -185,8 +185,8 @@ export default defineConfig({
         <a href="/introduction">Docs</a> ·
         <a href="https://www.npmjs.com/package/taladb" target="_blank" rel="noopener">npm</a> ·
         <a href="/roadmap">Roadmap</a> ·
-        <a href="https://github.com/tala-sh/taladb/discussions" target="_blank" rel="noopener">Discussions</a> ·
-        <a href="https://github.com/tala-sh/taladb/releases" target="_blank" rel="noopener">Changelog</a> ·
+        <a href="https://github.com/tala-io/taladb/discussions" target="_blank" rel="noopener">Discussions</a> ·
+        <a href="https://github.com/tala-io/taladb/releases" target="_blank" rel="noopener">Changelog</a> ·
         <a href="https://github.com/sponsors/tala-sh" target="_blank" rel="noopener">Sponsor</a>
         <br/>Released under the Apache License 2.0.
       `,
@@ -194,7 +194,7 @@ export default defineConfig({
     },
 
     editLink: {
-      pattern: "https://github.com/tala-sh/taladb/edit/main/docs/:path",
+      pattern: "https://github.com/tala-io/taladb/edit/main/docs/:path",
       text: "Edit this page on GitHub",
     },
 

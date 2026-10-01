@@ -542,10 +542,12 @@ Value TalaDBHostObject::get(Runtime &rt, const PropNameID &propName) {
                 if (count < 2) throw JSError(rt, (name + " requires 2 arguments").c_str());
                 auto col   = args[0].getString(rt).utf8(rt);
                 auto field = args[1].getString(rt).utf8(rt);
-                if      (name == "createIndex")    taladb_create_index    (db_, col.c_str(), field.c_str());
-                else if (name == "dropIndex")      taladb_drop_index      (db_, col.c_str(), field.c_str());
-                else if (name == "createFtsIndex") taladb_create_fts_index(db_, col.c_str(), field.c_str());
-                else                               taladb_drop_fts_index  (db_, col.c_str(), field.c_str());
+                int32_t res;
+                if      (name == "createIndex")    res = taladb_create_index    (db_, col.c_str(), field.c_str());
+                else if (name == "dropIndex")      res = taladb_drop_index      (db_, col.c_str(), field.c_str());
+                else if (name == "createFtsIndex") res = taladb_create_fts_index(db_, col.c_str(), field.c_str());
+                else                               res = taladb_drop_fts_index  (db_, col.c_str(), field.c_str());
+                if (res < 0) throw ffiError(rt, (name + " failed").c_str());
                 return Value::undefined();
             });
     }
@@ -560,10 +562,10 @@ Value TalaDBHostObject::get(Runtime &rt, const PropNameID &propName) {
                 if (count < 2) throw JSError(rt, (name + " requires 2 arguments").c_str());
                 auto col        = args[0].getString(rt).utf8(rt);
                 auto fieldsJson = stringify(rt, args[1]);   // string[] → JSON array
-                if (name == "createCompoundIndex")
-                    taladb_create_compound_index(db_, col.c_str(), fieldsJson.c_str());
-                else
-                    taladb_drop_compound_index(db_, col.c_str(), fieldsJson.c_str());
+                int32_t res = name == "createCompoundIndex"
+                    ? taladb_create_compound_index(db_, col.c_str(), fieldsJson.c_str())
+                    : taladb_drop_compound_index(db_, col.c_str(), fieldsJson.c_str());
+                if (res < 0) throw ffiError(rt, (name + " failed").c_str());
                 return Value::undefined();
             });
     }
