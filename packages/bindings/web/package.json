@@ -29,12 +29,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/tala-sh/taladb.git",
+    "url": "https://github.com/tala-io/taladb.git",
     "directory": "packages/bindings/web"
   },
   "homepage": "https://taladb.dev/guide/web",
   "bugs": {
-    "url": "https://github.com/tala-sh/taladb/issues"
+    "url": "https://github.com/tala-io/taladb/issues"
   },
   "engines": {
     "node": ">=18"

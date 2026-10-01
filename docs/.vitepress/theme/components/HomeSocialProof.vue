@@ -3,7 +3,7 @@
     <div class="sp-container">
       <a
         class="sp-badge"
-        href="https://github.com/tala-sh/taladb"
+        href="https://github.com/tala-io/taladb"
         target="_blank"
         rel="noopener"
       >
