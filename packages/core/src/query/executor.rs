@@ -8,7 +8,10 @@ use crate::document::{Document, Value};
 use crate::engine::{ReadTxn, ScanFlow};
 use crate::error::TalaDbError;
 use crate::fts::{fts_table_name, fts_token_range, tokenize, ulid_from_fts_key};
-use crate::index::{compound_table_name, docs_table_name, index_table_name, ulid_from_index_key};
+use crate::index::{
+    CompoundIndexDef, IndexDef, compound_table_name, docs_table_name, index_table_name,
+    ulid_from_index_key,
+};
 use crate::query::filter::Filter;
 use crate::query::planner::QueryPlan;
 
@@ -39,8 +42,16 @@ pub(crate) fn matching_ids(
     filter: &Filter,
     txn: &dyn ReadTxn,
     collection: &str,
+    indexes: &[IndexDef],
+    compounds: &[CompoundIndexDef],
 ) -> Result<HashSet<[u8; 16]>, TalaDbError> {
     let matcher = Matcher::new(filter)?;
+    let covered = super::index_filter::resolve(filter, indexes, compounds, txn, collection)?;
+    if let Some(covered) = &covered
+        && covered.exact
+    {
+        return Ok(covered.ids.clone());
+    }
     let mut ids = HashSet::new();
     let fields = super::filter_document::fields(filter);
     let table = docs_table_name(collection);
@@ -51,7 +62,13 @@ pub(crate) fn matching_ids(
         }
         Ok(())
     };
-    if matches!(plan, QueryPlan::FullScan) {
+    if let Some(covered) = covered {
+        for id in covered.ids {
+            if let Some(bytes) = txn.get(&table, &id)? {
+                accept(&bytes)?;
+            }
+        }
+    } else if matches!(plan, QueryPlan::FullScan) {
         txn.scan(
             &table,
             Bound::Unbounded,

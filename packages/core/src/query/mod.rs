@@ -8,3 +8,4 @@ pub use options::{FindOptions, SortDirection, SortSpec};
 pub use planner::{QueryPlan, plan};
 
 mod filter_document;
+mod index_filter;

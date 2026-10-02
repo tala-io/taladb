@@ -1303,7 +1303,14 @@ impl Collection {
             &cache.fts_indexes,
             &cache.compound_indexes,
         );
-        crate::query::executor::matching_ids(&plan, filter, txn, &self.name)
+        crate::query::executor::matching_ids(
+            &plan,
+            filter,
+            txn,
+            &self.name,
+            &cache.indexes,
+            &cache.compound_indexes,
+        )
     }
 
     fn find_nearest_in(

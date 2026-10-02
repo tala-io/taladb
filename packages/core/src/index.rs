@@ -217,6 +217,56 @@ pub fn ulid_from_index_key(key: &[u8]) -> Option<Ulid> {
     Some(Ulid::from_bytes(bytes))
 }
 
+/// Decode one value prefix, leaving subsequent compound fields unconsumed.
+pub(crate) fn decode_value_prefix(bytes: &[u8]) -> Option<(Value, &[u8])> {
+    let (&tag, rest) = bytes.split_first()?;
+    match tag {
+        0x00 => Some((Value::Null, rest)),
+        0x10 | 0x11 => Some((Value::Bool(tag == 0x11), rest)),
+        TAG_INT | TAG_FLOAT => {
+            let word = u64::from_be_bytes(rest.get(..8)?.try_into().ok()?);
+            let value = if tag == TAG_INT {
+                Value::Int((word ^ 0x8000_0000_0000_0000) as i64)
+            } else {
+                let bits = if word >> 63 == 1 {
+                    word ^ 0x8000_0000_0000_0000
+                } else {
+                    !word
+                };
+                Value::Float(f64::from_bits(bits))
+            };
+            Some((value, &rest[8..]))
+        }
+        0x40 | 0x50 => {
+            let mut value = Vec::new();
+            let mut rest = rest;
+            loop {
+                let (&byte, tail) = rest.split_first()?;
+                rest = tail;
+                if byte == 0 {
+                    if rest.first() == Some(&0xff) {
+                        value.push(0);
+                        rest = &rest[1..];
+                    } else {
+                        break;
+                    }
+                } else {
+                    value.push(byte);
+                }
+            }
+            Some((
+                if tag == 0x40 {
+                    Value::Str(String::from_utf8(value).ok()?)
+                } else {
+                    Value::Bytes(value)
+                },
+                rest,
+            ))
+        }
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Index metadata
 // ---------------------------------------------------------------------------
