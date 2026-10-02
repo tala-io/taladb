@@ -17,6 +17,8 @@
 
 - Resolve covered vector filters from secondary-index keys, including scalar equality, ranges, `$in`, covered AND/OR branches and complete compound equalities. Residual predicates still read document fields. Exact filtered searches batch sparse vector lookups and use streaming scans or an existing decoded cache for dense matches, without populating the full-vector cache. Fixed indexed two-sided ranges on arrays and inclusive bounds at signed zero. Native CI now compares sparse, moderate, dense and range filters in exact and ANN modes with cold and warm vector caches.
 
+- Reduced HNSW traversal allocations with compact cached links, stack neighbor buffers, and reusable visited sets, heaps and quantized-vector decoding buffers. Retained scratch allocations count toward the shared cache budget and are capped at 128 KiB or one thirty-second of that budget. Stored graphs and scoring semantics are unchanged. Added browser worker/OPFS benchmarks with 1 MiB and 8 MiB cache profiles, persisted reopen, first-query and warm latency, filtered recall, and origin-memory measurements where supported. The same workload can run manually on a phone's browser.
+
 ## 0.11.9 — 2026-10-02
 
 Groundwork for first-party Kotlin and Swift packages that wrap the C FFI directly, without React Native. Those packages live in their own repositories (`tala-io/taladb-kotlin`, `tala-io/taladb-swift`) and consume prebuilt libraries from the GitHub release, so the C interface now carries an explicit version.

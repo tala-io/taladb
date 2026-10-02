@@ -214,6 +214,28 @@ impl Code {
             Self::Binary(v) => v.len() == d.div_ceil(8),
         }
     }
+    fn decode_into<'a>(&'a self, dimensions: usize, scratch: &'a mut Vec<f32>) -> &'a [f32] {
+        if let Self::Float(values) = self {
+            return values;
+        }
+        scratch.clear();
+        match self {
+            Self::Scalar { values, min, step } => scratch.extend(
+                values
+                    .iter()
+                    .map(|x| (f64::from(*min) + f64::from(*step) * f64::from(*x)) as f32),
+            ),
+            Self::Binary(bits) => scratch.extend((0..dimensions).map(|i| {
+                if bits[i / 8] & (1 << (i % 8)) != 0 {
+                    1.0
+                } else {
+                    -1.0
+                }
+            })),
+            Self::Float(_) => unreachable!(),
+        }
+        scratch
+    }
     fn norm_sq(&self, dimensions: usize) -> f32 {
         match self {
             Self::Binary(_) if dimensions <= MAX_EXACT_BINARY_DIMENSIONS => dimensions as f32,
@@ -267,7 +289,7 @@ impl<'a> Query<'a> {
             norm: self.norm,
         }
     }
-    fn score(&self, code: &Code, stored_norm_sq: f32, h: &Header) -> f32 {
+    fn score(&self, code: &Code, stored_norm_sq: f32, h: &Header, scratch: &mut Vec<f32>) -> f32 {
         match (&self.values, code) {
             (QueryValues::Binary(a), Code::Binary(b)) if h.metric == VectorMetric::Cosine => {
                 let dot = binary_dot(a, b, h.dimensions);
@@ -282,7 +304,7 @@ impl<'a> Query<'a> {
                 &h.metric,
                 q,
                 self.norm,
-                &code.decode(h.dimensions),
+                code.decode_into(h.dimensions, scratch),
                 stored_norm_sq,
             ),
             // The node decoder accepts mixed code types; preserve its scoring
@@ -291,7 +313,7 @@ impl<'a> Query<'a> {
                 &h.metric,
                 &Code::Binary(q.to_vec()).decode(h.dimensions),
                 self.norm,
-                &code.decode(h.dimensions),
+                code.decode_into(h.dimensions, scratch),
                 stored_norm_sq,
             ),
         }
@@ -323,6 +345,120 @@ struct Node {
     code: Code,
     links: Vec<Vec<u64>>,
     deleted: bool,
+}
+
+/// A single allocation holds layer boundaries followed by all neighbors.
+/// Storage still serializes `Node`; this representation is only a cache detail.
+struct CachedLinks(Box<[u64]>);
+impl<'de> Deserialize<'de> for CachedLinks {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Layers;
+        impl<'de> serde::de::Visitor<'de> for Layers {
+            type Value = CachedLinks;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("at most 17 HNSW layers of at most 256 neighbors")
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Self::Value, A::Error> {
+                let layers = seq
+                    .size_hint()
+                    .ok_or_else(|| serde::de::Error::custom("missing HNSW layer count"))?;
+                if !(1..=17).contains(&layers) {
+                    return Err(serde::de::Error::custom("invalid HNSW layer count"));
+                }
+                let mut packed = vec![0; layers + 1];
+                packed[0] = layers as u64;
+                for layer in 0..layers {
+                    seq.next_element_seed(Neighbors(&mut packed))?
+                        .ok_or_else(|| serde::de::Error::custom("missing HNSW layer"))?;
+                    packed[layer + 1] = packed.len() as u64;
+                }
+                Ok(CachedLinks(packed.into_boxed_slice()))
+            }
+        }
+        struct Neighbors<'a>(&'a mut Vec<u64>);
+        impl<'de> serde::de::DeserializeSeed<'de> for Neighbors<'_> {
+            type Value = ();
+            fn deserialize<D: serde::Deserializer<'de>>(
+                self,
+                deserializer: D,
+            ) -> Result<(), D::Error> {
+                deserializer.deserialize_seq(self)
+            }
+        }
+        impl<'de> serde::de::Visitor<'de> for Neighbors<'_> {
+            type Value = ();
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("at most 256 HNSW neighbors")
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
+                if seq.size_hint().is_some_and(|n| n > 256) {
+                    return Err(serde::de::Error::custom("too many HNSW neighbors"));
+                }
+                let start = self.0.len();
+                self.0.reserve(seq.size_hint().unwrap_or(0));
+                while let Some(id) = seq.next_element::<u64>()? {
+                    if self.0.len() - start == 256 {
+                        return Err(serde::de::Error::custom("too many HNSW neighbors"));
+                    }
+                    self.0.push(id);
+                }
+                Ok(())
+            }
+        }
+        deserializer.deserialize_seq(Layers)
+    }
+}
+impl CachedLinks {
+    fn new(links: Vec<Vec<u64>>) -> Self {
+        let mut end = links.len() + 1;
+        let mut packed = Vec::with_capacity(end + links.iter().map(Vec::len).sum::<usize>());
+        packed.push(links.len() as u64);
+        for layer in &links {
+            end += layer.len();
+            packed.push(end as u64);
+        }
+        for layer in links {
+            packed.extend(layer);
+        }
+        Self(packed.into_boxed_slice())
+    }
+    fn get(&self, layer: usize) -> Option<&[u64]> {
+        let layers = self.0[0] as usize;
+        if layer >= layers {
+            return None;
+        }
+        let start = if layer == 0 {
+            layers + 1
+        } else {
+            self.0[layer] as usize
+        };
+        Some(&self.0[start..self.0[layer + 1] as usize])
+    }
+    fn to_vec(&self) -> Vec<Vec<u64>> {
+        (0..self.0[0] as usize)
+            .map(|layer| self.get(layer).unwrap().to_vec())
+            .collect()
+    }
+}
+#[derive(Deserialize)]
+struct CachedNode {
+    doc: [u8; 16],
+    code: Code,
+    links: CachedLinks,
+    deleted: bool,
+}
+impl CachedNode {
+    fn to_node(&self) -> Node {
+        Node {
+            doc: self.doc,
+            code: self.code.clone(),
+            links: self.links.to_vec(),
+            deleted: self.deleted,
+        }
+    }
 }
 fn node_key(id: u64) -> [u8; 9] {
     let mut key = [1; 9];
@@ -384,12 +520,60 @@ impl std::hash::BuildHasher for IdHash {
 
 /// A cached node and the one derived value the hot loop needs from it.
 struct Cached {
-    node: Node,
+    node: CachedNode,
     /// Squared L2 norm of the decoded vector. Constant per node, needed by every
     /// cosine comparison against it.
     norm_sq: f32,
     referenced: bool,
     bytes: usize,
+}
+
+#[derive(Default)]
+struct TraversalScratch {
+    visited: HashSet<u64, IdHash>,
+    queue: BinaryHeap<Reverse<Hit>>,
+    best: BinaryHeap<Hit>,
+    decoded: Vec<f32>,
+}
+impl TraversalScratch {
+    fn clear(&mut self) {
+        self.visited.clear();
+        self.queue.clear();
+        self.best.clear();
+        self.decoded.clear();
+    }
+    fn bytes(&self) -> usize {
+        // HashSet capacity describes usable entries, not allocated buckets.
+        // Two words per entry conservatively cover buckets and control bytes.
+        self.visited.capacity() * 16
+            + (self.queue.capacity() + self.best.capacity()) * std::mem::size_of::<Hit>()
+            + self.decoded.capacity() * 4
+    }
+    fn trim(&mut self, mut budget: usize) {
+        // Preserve modest buffers independently: an exhaustive filtered walk
+        // must not discard a useful decode buffer just because its queue grew.
+        let bytes = self.decoded.capacity() * 4;
+        if bytes > budget {
+            self.decoded = Vec::new();
+        } else {
+            budget -= bytes;
+        }
+        let bytes = self.visited.capacity() * 16;
+        if bytes > budget {
+            self.visited = HashSet::default();
+        } else {
+            budget -= bytes;
+        }
+        let bytes = self.best.capacity() * std::mem::size_of::<Hit>();
+        if bytes > budget {
+            self.best = BinaryHeap::new();
+        } else {
+            budget -= bytes;
+        }
+        if self.queue.capacity() * std::mem::size_of::<Hit>() > budget {
+            self.queue = BinaryHeap::new();
+        }
+    }
 }
 
 /// Decoded nodes, owned by the caller rather than by a `Reader`.
@@ -405,6 +589,7 @@ pub(crate) struct NodeCache {
     clock: VecDeque<u64>,
     bytes: usize,
     budget: usize,
+    scratch: TraversalScratch,
 }
 impl Default for NodeCache {
     fn default() -> Self {
@@ -418,10 +603,11 @@ impl NodeCache {
             clock: VecDeque::new(),
             bytes: 0,
             budget,
+            scratch: TraversalScratch::default(),
         }
     }
     pub(crate) fn bytes(&self) -> usize {
-        self.bytes
+        self.bytes.saturating_add(self.scratch.bytes())
     }
     #[cfg(test)]
     fn is_empty(&self) -> bool {
@@ -434,6 +620,15 @@ impl NodeCache {
         }
     }
     fn insert_node(&mut self, id: u64, node: Node, dimensions: usize) {
+        let node = CachedNode {
+            doc: node.doc,
+            code: node.code,
+            links: CachedLinks::new(node.links),
+            deleted: node.deleted,
+        };
+        self.insert_cached_node(id, node, dimensions);
+    }
+    fn insert_cached_node(&mut self, id: u64, node: CachedNode, dimensions: usize) {
         // Include decoded vector/link capacities and a conservative allowance
         // for hash buckets, clock IDs, and the inline record. Serialized u64
         // links are varints and substantially undercount decoded memory.
@@ -441,18 +636,15 @@ impl NodeCache {
             Code::Float(v) => v.capacity() * 4,
             Code::Scalar { values, .. } | Code::Binary(values) => values.capacity(),
         };
-        let bytes = vector_bytes
-            + node.links.capacity() * std::mem::size_of::<Vec<u64>>()
-            + node.links.iter().map(|v| v.capacity() * 8).sum::<usize>()
-            + 2 * std::mem::size_of::<(u64, Cached)>()
-            + 16;
+        let bytes =
+            vector_bytes + node.links.0.len() * 8 + 2 * std::mem::size_of::<(u64, Cached)>() + 16;
         // Replacing an edited node should preserve its position in the clock.
         let replacing = self.nodes.remove(&id);
         if let Some(old) = &replacing {
             self.bytes = self.bytes.saturating_sub(old.bytes);
         }
         let mut queued = replacing.is_some();
-        while self.bytes.saturating_add(bytes) > self.budget && !self.nodes.is_empty() {
+        while self.bytes().saturating_add(bytes) > self.budget && !self.nodes.is_empty() {
             let Some(victim) = self.clock.pop_front() else {
                 break;
             };
@@ -485,6 +677,27 @@ impl NodeCache {
             self.clock.push_back(id);
         }
         self.bytes = self.bytes.saturating_add(bytes);
+    }
+    fn restore_scratch(&mut self, mut scratch: TraversalScratch) {
+        scratch.clear();
+        // Large filtered traversals can visit the whole graph. Do not retain
+        // their high-water allocations or displace most of the node cache.
+        scratch.trim((self.budget / 32).min(128 * 1024));
+        while self.bytes.saturating_add(scratch.bytes()) > self.budget && !self.nodes.is_empty() {
+            let Some(victim) = self.clock.pop_front() else {
+                break;
+            };
+            let Some(entry) = self.nodes.get_mut(&victim) else {
+                continue;
+            };
+            if entry.referenced {
+                entry.referenced = false;
+                self.clock.push_back(victim);
+            } else if let Some(old) = self.nodes.remove(&victim) {
+                self.bytes = self.bytes.saturating_sub(old.bytes);
+            }
+        }
+        self.scratch = scratch;
     }
 }
 
@@ -571,40 +784,46 @@ struct Reader<'a> {
     h: &'a Header,
     cache: &'a mut NodeCache,
     distances: usize,
+    scratch: TraversalScratch,
 }
 impl<'a> Reader<'a> {
     fn new(txn: &'a dyn ReadTxn, h: &'a Header, cache: &'a mut NodeCache) -> Self {
+        let scratch = std::mem::take(&mut cache.scratch);
         Self {
             txn,
             h,
             cache,
             distances: 0,
+            scratch,
         }
     }
-    fn cached(&mut self, id: u64) -> Result<&Cached, TalaDbError> {
+    fn load(&mut self, id: u64) -> Result<(), TalaDbError> {
         if !self.cache.nodes.contains_key(&id) {
             let bytes = self
                 .txn
                 .get(&self.h.table, &node_key(id))?
                 .ok_or_else(|| invalid("missing HNSW node; rebuild the vector index"))?;
-            let node: Node = postcard::from_bytes(&bytes)?;
-            if node.links.is_empty()
-                || node.links.len() > 17
-                || !node.code.valid(self.h.dimensions)
-                || node
-                    .links
-                    .iter()
-                    .any(|l| l.len() > self.h.options.m as usize * 2)
+            // Decode directly into the compact cache layout, avoiding the
+            // temporary per-layer allocations of the storage/write model.
+            let node: CachedNode = postcard::from_bytes(&bytes)?;
+            if !node.code.valid(self.h.dimensions)
+                || (0..node.links.0[0] as usize).any(|layer| {
+                    node.links.get(layer).unwrap().len() > self.h.options.m as usize * 2
+                })
             {
                 return Err(invalid("invalid HNSW node; rebuild the vector index"));
             }
-            self.cache.insert_node(id, node, self.h.dimensions);
+            self.cache.insert_cached_node(id, node, self.h.dimensions);
         }
+        Ok(())
+    }
+    fn cached(&mut self, id: u64) -> Result<&Cached, TalaDbError> {
+        self.load(id)?;
         let cached = self.cache.nodes.get_mut(&id).unwrap();
         cached.referenced = true;
         Ok(cached)
     }
-    fn node(&mut self, id: u64) -> Result<&Node, TalaDbError> {
+    fn node(&mut self, id: u64) -> Result<&CachedNode, TalaDbError> {
         Ok(&self.cached(id)?.node)
     }
     fn distance(&mut self, query: &Query<'_>, id: u64) -> Result<Hit, TalaDbError> {
@@ -612,8 +831,15 @@ impl<'a> Reader<'a> {
         // Scoped so the borrow of `self.nodes` ends before `self.distances` is
         // touched: with a borrowed `Cow` the vector points into the cached node.
         let score = {
-            let cached = self.cached(id)?;
-            query.score(&cached.node.code, cached.norm_sq, h)
+            self.load(id)?;
+            let cached = self.cache.nodes.get_mut(&id).unwrap();
+            cached.referenced = true;
+            query.score(
+                &cached.node.code,
+                cached.norm_sq,
+                h,
+                &mut self.scratch.decoded,
+            )
         };
         self.distances += 1;
         if !score.is_finite() {
@@ -625,15 +851,11 @@ impl<'a> Reader<'a> {
     }
     fn greedy(&mut self, q: &Query<'_>, entry: u64, layer: usize) -> Result<u64, TalaDbError> {
         let mut best = self.distance(q, entry)?;
+        let mut neighbors = [0u64; 256];
         loop {
             let before = best;
-            let links = self
-                .node(best.1)?
-                .links
-                .get(layer)
-                .cloned()
-                .unwrap_or_default();
-            for id in links {
+            let count = self.copy_links(best.1, layer, &mut neighbors)?;
+            for &id in &neighbors[..count] {
                 let h = self.distance(q, id)?;
                 if h < best {
                     best = h;
@@ -643,6 +865,16 @@ impl<'a> Reader<'a> {
                 return Ok(best.1);
             }
         }
+    }
+    fn copy_links(
+        &mut self,
+        id: u64,
+        layer: usize,
+        out: &mut [u64; 256],
+    ) -> Result<usize, TalaDbError> {
+        let links = self.node(id)?.links.get(layer).unwrap_or_default();
+        out[..links.len()].copy_from_slice(links);
+        Ok(links.len())
     }
     // Disallowed/tombstoned nodes are routing bridges, never returned hits.
     // Only eligible hits tighten the stopping bound, so selective filters do
@@ -656,46 +888,48 @@ impl<'a> Reader<'a> {
         allowed: Option<&HashSet<[u8; 16]>>,
         live_only: bool,
     ) -> Result<Vec<Hit>, TalaDbError> {
-        let mut visited = HashSet::new();
-        let mut queue = BinaryHeap::new();
-        let mut best = BinaryHeap::new();
+        self.scratch.visited.clear();
+        self.scratch.queue.clear();
+        self.scratch.best.clear();
+        let mut neighbors = [0u64; 256];
         for &id in entries {
             let hit = self.distance(q, id)?;
-            visited.insert(id);
-            queue.push(Reverse(hit));
+            self.scratch.visited.insert(id);
+            self.scratch.queue.push(Reverse(hit));
             let n = self.node(id)?;
             if (!live_only || !n.deleted) && allowed.is_none_or(|a| a.contains(&n.doc)) {
-                best.push(hit);
+                self.scratch.best.push(hit);
             }
         }
-        while let Some(Reverse(hit)) = queue.pop() {
-            if best.len() >= ef && best.peek().is_some_and(|worst| hit > *worst) {
+        while let Some(Reverse(hit)) = self.scratch.queue.pop() {
+            if self.scratch.best.len() >= ef
+                && self.scratch.best.peek().is_some_and(|worst| hit > *worst)
+            {
                 break;
             }
-            let links = self
-                .node(hit.1)?
-                .links
-                .get(layer)
-                .cloned()
-                .unwrap_or_default();
-            for id in links {
-                if !visited.insert(id) {
+            let count = self.copy_links(hit.1, layer, &mut neighbors)?;
+            for &id in &neighbors[..count] {
+                if !self.scratch.visited.insert(id) {
                     continue;
                 }
                 let next = self.distance(q, id)?;
-                if best.len() < ef || best.peek().is_some_and(|worst| next < *worst) {
-                    queue.push(Reverse(next));
+                if self.scratch.best.len() < ef
+                    || self.scratch.best.peek().is_some_and(|worst| next < *worst)
+                {
+                    self.scratch.queue.push(Reverse(next));
                     let n = self.node(id)?;
                     if (!live_only || !n.deleted) && allowed.is_none_or(|a| a.contains(&n.doc)) {
-                        best.push(next);
-                        if best.len() > ef {
-                            best.pop();
+                        self.scratch.best.push(next);
+                        if self.scratch.best.len() > ef {
+                            self.scratch.best.pop();
                         }
                     }
                 }
             }
         }
-        Ok(best.into_sorted_vec())
+        let mut hits: Vec<_> = self.scratch.best.drain().collect();
+        hits.sort_unstable();
+        Ok(hits)
     }
     fn select(&mut self, candidates: Vec<Hit>, limit: usize) -> Result<Vec<u64>, TalaDbError> {
         let mut selected = Vec::new();
@@ -731,6 +965,13 @@ impl<'a> Reader<'a> {
     }
 }
 
+impl Drop for Reader<'_> {
+    fn drop(&mut self) {
+        self.cache
+            .restore_scratch(std::mem::take(&mut self.scratch));
+    }
+}
+
 /// Tombstone the current version of a document. Old links remain valid.
 pub(crate) fn remove(
     txn: &mut dyn WriteTxn,
@@ -747,7 +988,7 @@ pub(crate) fn remove(
         let mut cache = NodeCache::default();
         let mut n = Reader::new(&WriteView(txn), h, &mut cache)
             .node(id)?
-            .clone();
+            .to_node();
         if !n.deleted {
             n.deleted = true;
             h.live = h
@@ -883,7 +1124,7 @@ pub(crate) fn insert_cached(
                 for &neighbor in neighbors {
                     let mut n = match updates.get(&neighbor) {
                         Some(pending) => pending.clone(),
-                        None => reader.node(neighbor)?.clone(),
+                        None => reader.node(neighbor)?.to_node(),
                     };
                     n.links[layer].push(id);
                     let limit = h.options.m as usize * if layer == 0 { 2 } else { 1 };
@@ -1029,13 +1270,17 @@ mod binary_tests {
                 );
                 let prepared = Query::code(&a, dimensions).into_owned();
                 assert_eq!(
-                    prepared.score(&b, b.norm_sq(dimensions), &h).to_bits(),
+                    prepared
+                        .score(&b, b.norm_sq(dimensions), &h, &mut Vec::new())
+                        .to_bits(),
                     expected.to_bits()
                 );
                 // The fallback handles mixed record codes without changing scores.
                 let float_b = Code::Float(decoded_b.to_vec());
                 assert_eq!(
-                    prepared.score(&float_b, expected_norm, &h).to_bits(),
+                    prepared
+                        .score(&float_b, expected_norm, &h, &mut Vec::new())
+                        .to_bits(),
                     expected.to_bits()
                 );
                 let float_query: Vec<_> = decoded_a
@@ -1052,7 +1297,7 @@ mod binary_tests {
                 );
                 assert_eq!(
                     Query::float(&float_query)
-                        .score(&b, expected_norm, &h)
+                        .score(&b, expected_norm, &h, &mut Vec::new())
                         .to_bits(),
                     expected.to_bits()
                 );
@@ -1135,5 +1380,125 @@ mod cache_tests {
         cache.insert_node(100, node(), 2);
         assert!(cache.bytes <= cache.budget);
         assert_eq!(cache.clock.len(), cache.nodes.len());
+    }
+    #[test]
+    fn compact_links_round_trip_empty_and_maximum_layers_without_changing_storage() {
+        let mut n = node();
+        n.links = (0..17)
+            .map(|layer| {
+                if layer % 3 == 0 {
+                    vec![]
+                } else {
+                    (0..256).collect()
+                }
+            })
+            .collect();
+        n.deleted = true;
+        let bytes = postcard::to_allocvec(&n).unwrap();
+        let decoded: CachedNode = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(postcard::to_allocvec(&decoded.to_node()).unwrap(), bytes);
+        let mut cache = NodeCache::default();
+        cache.insert_node(42, n, 2);
+        let cached = &cache.nodes[&42].node;
+        assert!(cached.links.get(17).is_none());
+        assert_eq!(postcard::to_allocvec(&cached.to_node()).unwrap(), bytes);
+    }
+    #[test]
+    fn reusable_scratch_is_cleared_accounted_and_trimmed_without_flushing_nodes() {
+        let mut cache = NodeCache::with_budget(128 * 1024);
+        for id in 0..1000 {
+            cache.insert_node(id, node(), 2);
+        }
+        let before = cache.nodes.len();
+        let mut scratch = TraversalScratch::default();
+        scratch.visited.extend(0..32);
+        scratch
+            .queue
+            .extend((0..32).map(|id| Reverse(Hit(1.0, id))));
+        scratch.best.extend((0..32).map(|id| Hit(1.0, id)));
+        scratch.decoded.extend([1.0; 384]);
+        let bytes = scratch.bytes();
+        cache.restore_scratch(scratch);
+        assert_eq!(cache.scratch.bytes(), bytes);
+        assert!(
+            cache.scratch.visited.is_empty()
+                && cache.scratch.queue.is_empty()
+                && cache.scratch.best.is_empty()
+                && cache.scratch.decoded.is_empty()
+        );
+        assert!(cache.nodes.len() < before && !cache.nodes.is_empty());
+        assert!(cache.bytes() <= cache.budget);
+        for id in 1000..1100 {
+            cache.insert_node(id, node(), 2);
+        }
+        assert!(cache.bytes() <= cache.budget);
+        let mut scratch = std::mem::take(&mut cache.scratch);
+        scratch.queue.reserve(100_000);
+        cache.restore_scratch(scratch);
+        assert_eq!(cache.scratch.decoded.capacity(), 384);
+        assert_eq!(cache.scratch.queue.capacity(), 0);
+        assert!(cache.bytes() <= cache.budget);
+        cache.budget = 0;
+        let scratch = std::mem::take(&mut cache.scratch);
+        cache.restore_scratch(scratch);
+        assert_eq!(cache.bytes(), 0);
+    }
+    #[test]
+    fn reused_decode_buffer_preserves_quantized_components_and_scores() {
+        let mut scratch = vec![99.0; 2000];
+        for dimensions in [1usize, 7, 65, 128, 384, 1536, 3] {
+            let values: Vec<_> = (0..dimensions).map(|i| (i as f32 - 50.0) / 31.0).collect();
+            for quantization in [
+                Quantization::None,
+                Quantization::Scalar,
+                Quantization::Binary,
+            ] {
+                let code = Code::encode(&values, quantization);
+                let expected = code.decode(dimensions);
+                let got = code.decode_into(dimensions, &mut scratch);
+                assert_eq!(got.len(), expected.len());
+                assert!(
+                    got.iter()
+                        .zip(expected.iter())
+                        .all(|(a, b)| a.to_bits() == b.to_bits())
+                );
+                for metric in [VectorMetric::Cosine, VectorMetric::Euclidean] {
+                    let h = Header::new(
+                        "test".into(),
+                        0,
+                        GraphOptions::default(),
+                        dimensions,
+                        metric,
+                    );
+                    let expected = score_with_norms(
+                        &metric,
+                        &values,
+                        l2_norm(&values),
+                        &expected,
+                        code.norm_sq(dimensions),
+                    );
+                    assert_eq!(
+                        Query::float(&values)
+                            .score(&code, code.norm_sq(dimensions), &h, &mut scratch)
+                            .to_bits(),
+                        expected.to_bits()
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn compact_decoder_rejects_invalid_layer_counts_neighbor_counts_and_truncation() {
+        for links in [vec![], vec![vec![]; 18], vec![vec![0; 257]]] {
+            let mut n = node();
+            n.links = links;
+            assert!(
+                postcard::from_bytes::<CachedNode>(&postcard::to_allocvec(&n).unwrap()).is_err()
+            );
+        }
+        let bytes = postcard::to_allocvec(&node()).unwrap();
+        for end in 0..bytes.len() {
+            assert!(postcard::from_bytes::<CachedNode>(&bytes[..end]).is_err());
+        }
     }
 }

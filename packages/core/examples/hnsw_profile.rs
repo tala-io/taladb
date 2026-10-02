@@ -10,7 +10,8 @@
 //!     cargo run --release -p taladb --example hnsw_profile -- 10000 0.6 --json --quantization binary --queries 100 --seed 1
 //!
 //! Optional controls: --dims, --queries, --seed, --m, --ef-construction and
-//! --quantization (none/scalar/binary), and --batch-size (1..=1024) for staged
+//! --quantization (none/scalar/binary), --cache-bytes (default 8 MiB), and
+//! --batch-size (1..=1024) for staged
 //! builds. JSON mode uses queries independent of
 //! the collection size, so recall can be compared across larger collections.
 
@@ -82,6 +83,7 @@ fn main() {
     let dimensions = option("--dims", DIMS as u32) as usize;
     let queries = option("--queries", QUERIES as u32) as usize;
     let seed = option("--seed", 0);
+    let cache_bytes = option("--cache-bytes", 8 * 1024 * 1024) as usize;
     assert!(
         dimensions > 0 && queries > 0,
         "dimensions and queries must be positive"
@@ -145,6 +147,7 @@ fn main() {
         .collect();
 
     let db = Database::open_in_memory().unwrap();
+    db.set_vector_cache_budget(cache_bytes);
     let col = db.collection("docs").unwrap();
 
     let t = Instant::now();
@@ -235,6 +238,9 @@ fn main() {
         println!("\nexact              {exact_ms:>8.3} ms/query");
     }
     let mut measurements = Vec::new();
+    // Start ANN without the exact ground-truth block displacing graph nodes.
+    db.set_vector_cache_budget(0);
+    db.set_vector_cache_budget(cache_bytes);
     for ef in [50usize, 100, 200, 400] {
         let opts = VectorQueryOptions {
             mode: VectorSearchMode::Ann,
@@ -277,7 +283,8 @@ fn main() {
         query_times.sort_by(f64::total_cmp);
         measurements.push(serde_json::json!({ "ef_search": ef, "mean_ms": elapsed_ms,
             "p50_ms": query_times[queries / 2], "p95_ms": query_times[queries * 95 / 100],
-            "recall_at_10": recall / queries as f64, "distances": distances / queries }));
+            "recall_at_10": recall / queries as f64, "distances": distances / queries,
+            "retained_cache_bytes": db.vector_cache_stats().retained_bytes }));
     }
     if json_output {
         step_times.sort_by(f64::total_cmp);
@@ -298,6 +305,7 @@ fn main() {
             "{}",
             serde_json::json!({ "schema": 1, "count": count, "dimensions": dimensions,
             "spread": spread, "m": m, "ef_construction": ef_construction, "queries": queries, "seed": seed, "quantization": quantization,
+            "cache_bytes": cache_bytes,
             "batch_size": batch_size, "build_steps": step_times.len(), "step_p95_ms": step_p95_ms,
             "insert_ms": insert_ms, "build_ms": build.as_secs_f64() * 1000.0,
             "exact_mean_ms": exact_ms, "ann": measurements, "peak_rss_bytes": peak_rss_bytes })
