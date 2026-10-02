@@ -391,15 +391,16 @@ pub(crate) struct CachedGraph {
     pub cache: NodeCache,
 }
 
-/// A loan pins decoded nodes to the snapshot's unique graph table and vector
-/// revision. DDL changes the table identity; invalidation prevents an older
-/// query from returning its loan after the retained cache has been cleared.
+/// A loan pins decoded nodes to a unique graph table and its vector revision
+/// (queries) or committed progress (builds). DDL changes the table identity;
+/// invalidation prevents old loans from repopulating a cleared cache.
 pub(crate) struct CacheLease<'a> {
     shared: &'a crate::search_cache::SharedSearchCache,
     table: String,
     revision: u64,
     epoch: u64,
     cache: Option<NodeCache>,
+    retain: bool,
 }
 impl<'a> CacheLease<'a> {
     pub(crate) fn take(
@@ -421,7 +422,23 @@ impl<'a> CacheLease<'a> {
             revision,
             epoch: map.epoch,
             cache: Some(cache),
+            retain: true,
         }
+    }
+    /// A writer must explicitly confirm commit before returning edited nodes.
+    /// Build progress, rather than vector revision, versions each partial graph.
+    pub(crate) fn take_for_build(
+        shared: &'a crate::search_cache::SharedSearchCache,
+        table: &str,
+        processed: u64,
+    ) -> Self {
+        let mut lease = Self::take(shared, table, processed);
+        lease.retain = false;
+        lease
+    }
+    pub(crate) fn committed_build(&mut self, processed: u64) {
+        self.revision = processed;
+        self.retain = true;
     }
     pub(crate) fn cache_mut(&mut self) -> &mut NodeCache {
         self.cache
@@ -431,7 +448,7 @@ impl<'a> CacheLease<'a> {
 }
 impl Drop for CacheLease<'_> {
     fn drop(&mut self) {
-        if let Some(cache) = self.cache.take() {
+        if let Some(cache) = self.cache.take().filter(|_| self.retain) {
             self.shared
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -840,18 +857,15 @@ pub(crate) fn search(
     if h.live == 0 {
         return Ok((vec![], 0));
     }
-    let q = if h.options.quantization == Quantization::Binary {
-        Code::encode(query, Quantization::Binary)
-            .decode(h.dimensions)
-            .into_owned()
-    } else {
-        query.to_vec()
-    };
+    // Compress stored nodes, not the query. Sign-only binary queries discard
+    // component magnitudes and can reject the true neighbour before exact
+    // rescoring sees it. Comparing the original query with decoded codes also
+    // works with existing binary graphs; the stored format is unchanged.
     let mut reader = Reader::new(txn, h, cache);
     for layer in (1..=h.level).rev() {
-        entry = reader.greedy(&q, entry, layer)?;
+        entry = reader.greedy(query, entry, layer)?;
     }
-    let hits = reader.layer(&q, &[entry], 0, ef.max(1), allowed, true)?;
+    let hits = reader.layer(query, &[entry], 0, ef.max(1), allowed, true)?;
     let ids = hits
         .iter()
         .map(|h| reader.node(h.1).map(|n| n.doc))
@@ -895,6 +909,26 @@ mod cache_tests {
         assert_eq!(shared.lock().unwrap().stats().graph_indexes, 1);
         let mut lease = CacheLease::take(&shared, "hnsw::docs::v::a", 2);
         assert!(lease.cache_mut().is_empty());
+    }
+    #[test]
+    fn build_loans_only_retain_committed_progress_and_cannot_survive_cancellation() {
+        let shared = new_shared_search_cache();
+        let table = "hnsw::docs::v::build";
+        let mut lease = CacheLease::take_for_build(&shared, table, 0);
+        lease.cache_mut().insert_node(0, node(), 2);
+        lease.committed_build(1);
+        drop(lease);
+        let mut lease = CacheLease::take_for_build(&shared, table, 1);
+        assert!(!lease.cache_mut().is_empty());
+        // A rolled-back write must discard even nodes retained from the prior step.
+        drop(lease);
+        assert_eq!(shared.lock().unwrap().stats().graph_indexes, 0);
+        let mut lease = CacheLease::take_for_build(&shared, table, 1);
+        lease.cache_mut().insert_node(0, node(), 2);
+        lease.committed_build(2);
+        shared.lock().unwrap().evict_graph(table);
+        drop(lease);
+        assert_eq!(shared.lock().unwrap().stats().graph_indexes, 0);
     }
     #[test]
     fn clock_eviction_keeps_nodes_instead_of_flushing_the_cache() {

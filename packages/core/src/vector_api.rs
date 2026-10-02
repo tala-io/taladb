@@ -565,18 +565,19 @@ impl Collection {
                 "vector build changed concurrently; read its status before resuming",
             ));
         }
+        let shared = self.node_cache();
+        let mut lease = None;
         if revision(&WriteView(txn.as_ref()), &vtable)? != build.progress.revision {
             build.progress.state = "failed".into();
             build.progress.error =
                 Some("vectors changed during the build; restart the build".into());
             txn.delete_table(&build.header.table)?;
         } else {
-            let budget = self
-                .node_cache()
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .budget();
-            let mut cache = graph::NodeCache::with_budget(budget);
+            let cache = lease.insert(graph::CacheLease::take_for_build(
+                shared,
+                &build.header.table,
+                build.progress.processed,
+            ));
             for (key, bytes) in batch {
                 let vector =
                     decode_f32_vec(&bytes).ok_or_else(|| invalid("invalid stored vector"))?;
@@ -586,7 +587,7 @@ impl Collection {
                     <[u8; 16]>::try_from(key.as_slice())
                         .map_err(|_| invalid("invalid stored vector ID"))?,
                     &vector,
-                    &mut cache,
+                    cache.cache_mut(),
                 )?;
                 build.last = Some(key);
                 build.progress.processed += 1;
@@ -607,6 +608,15 @@ impl Collection {
         txn.commit()?;
         if build.progress.state == "ready" {
             self.evict_node_cache(field);
+        } else if build.progress.state == "building" {
+            if let Some(lease) = &mut lease {
+                lease.committed_build(build.progress.processed);
+            }
+        } else {
+            shared
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .evict_graph(&build.header.table);
         }
         Ok(build.progress)
     }
@@ -634,6 +644,12 @@ impl Collection {
             )?;
         }
         txn.commit()?;
+        if build.progress.state == "cancelled" {
+            self.node_cache()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .evict_graph(&build.header.table);
+        }
         Ok(build.progress)
     }
     pub fn search_vectors(

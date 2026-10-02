@@ -186,6 +186,12 @@ impl SearchCache {
         self.entries
             .retain(|k, _| *k != vector && !k.starts_with(&graph));
     }
+    pub fn evict_graph(&mut self, table: &str) {
+        // Also reject a build loan returned after cancellation released its
+        // write lock. Active-index entries remain available for subsequent reads.
+        self.epoch = self.epoch.wrapping_add(1);
+        self.entries.remove(&format!("g:{table}"));
+    }
 }
 
 #[cfg(test)]

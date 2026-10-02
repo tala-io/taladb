@@ -9,6 +9,10 @@
 
 - Added one configurable retained cache budget shared by exact vectors and HNSW graphs, with incremental clock eviction within graphs and LRU eviction between indexes. Defaults are 8 MiB on Android, iOS and WASM and 64 MiB on other native targets.
 
+- Improved binary-quantized HNSW candidate selection by retaining full-precision queries during traversal. Previously, reducing queries to signs discarded component magnitudes before exact rescoring. Existing graphs benefit without a rebuild. Native CI now compares both full-precision and binary-quantized workloads against exact-search ground truth.
+
+- Reused decoded HNSW nodes across resumable build steps within the shared cache budget. Only committed edits are retained; failed transactions, cancellation and publication discard the partial-build cache. Native CI now compares resumable build performance, with separate Cargo artifacts for baseline and candidate checkouts.
+
 ## 0.11.9 — 2026-10-02
 
 Groundwork for first-party Kotlin and Swift packages that wrap the C FFI directly, without React Native. Those packages live in their own repositories (`tala-io/taladb-kotlin`, `tala-io/taladb-swift`) and consume prebuilt libraries from the GitHub release, so the C interface now carries an explicit version.

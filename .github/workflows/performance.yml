@@ -31,6 +31,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
+        quantization: [none, binary]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -57,6 +58,7 @@ jobs:
       - name: Compare release workloads
         env:
           BENCH_EVENT: ${{ github.event_name }}
+          BENCH_QUANTIZATION: ${{ matrix.quantization }}
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
         run: |
           count=2000
@@ -66,11 +68,27 @@ jobs:
             repeats=1
           fi
           python scripts/vector-bench-ci.py "$RUNNER_TEMP/vector-baseline" "$GITHUB_WORKSPACE" \
-            --count "$count" --repeats "$repeats" --output vector-benchmark.json
+            --count "$count" --repeats "$repeats" --quantization "$BENCH_QUANTIZATION" --output vector-benchmark.json
+      - name: Compare resumable builds
+        if: matrix.quantization == 'none'
+        env:
+          BENCH_EVENT: ${{ github.event_name }}
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+        run: |
+          count=2000
+          repeats=3
+          if [ "$BENCH_EVENT" != pull_request ]; then
+            count=10000
+            repeats=1
+          fi
+          python scripts/vector-bench-ci.py "$RUNNER_TEMP/vector-baseline" "$GITHUB_WORKSPACE" \
+            --count "$count" --repeats "$repeats" --batch-size 128 --output vector-benchmark-staged.json
       - name: Publish benchmark history
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: vector-benchmark-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}-${{ github.run_attempt }}
-          path: vector-benchmark.json
+          name: vector-benchmark-${{ runner.os }}-${{ runner.arch }}-${{ matrix.quantization }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            vector-benchmark.json
+            vector-benchmark-staged.json
           retention-days: 90
