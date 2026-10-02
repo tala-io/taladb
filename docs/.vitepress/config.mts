@@ -106,7 +106,7 @@ export default defineConfig({
         text: "Live Demo",
         items: [
           { text: "Web Demo", link: "https://demo-web.taladb.dev/" },
-          { text: "Mobile Demo", link: "https://appetize.io/app/b_ugmjhjghdkgnjux4lzkepvsfma" },
+          { text: "Mobile Demo", link: "https://play.google.com/store/apps/details?id=dev.thinkgrid.kepta" },
         ],
       },
       {

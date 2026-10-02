@@ -17,7 +17,7 @@
           Web Demo →
         </a>
         <a
-          href="https://appetize.io/app/b_ugmjhjghdkgnjux4lzkepvsfma"
+          href="https://play.google.com/store/apps/details?id=dev.thinkgrid.kepta"
           class="btn btn-secondary btn-lg"
           target="_blank"
           rel="noopener"

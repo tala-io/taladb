@@ -147,4 +147,4 @@ TalaDB is production-ready. The Rust core, browser WASM, Node.js bindings, and R
 
 The native [Kotlin](/guide/android) and [Swift](/guide/swift) packages are an **early release**: they cover documents, indexes, vector, full-text and hybrid search, live queries, migrations and encryption, and are tested against the same engine, but their APIs may still change and they are not yet published to Maven Central or SwiftPM.
 
-Try the [web demo](https://demo-web.taladb.dev/) to see TalaDB running in the browser with OPFS persistence and on-device semantic search, or the [mobile demo](https://appetize.io/app/b_ugmjhjghdkgnjux4lzkepvsfma) to see it running on React Native. Follow the [GitHub repository](https://github.com/tala-io/taladb) for progress updates.
+Try the [web demo](https://demo-web.taladb.dev/) to see TalaDB running in the browser with OPFS persistence and on-device semantic search, or install the [mobile demo](https://play.google.com/store/apps/details?id=dev.thinkgrid.kepta) from Google Play to see it running on React Native. Follow the [GitHub repository](https://github.com/tala-io/taladb) for progress updates.
