@@ -13,7 +13,7 @@ Store documents, metadata, and vectors together. Query structured data and seman
 [![Platform](https://img.shields.io/badge/Platform-Browser%20%7C%20React%20Native%20%7C%20Node.js-green)](https://github.com/tala-io/taladb)
 [![Sponsor](https://img.shields.io/badge/Sponsor-taladb-red?logo=github-sponsors)](https://github.com/sponsors/tala-sh)
 
-**[Documentation](https://taladb.dev) · [Web Demo](https://taladb-playground.vercel.app/) · [Mobile Demo](https://appetize.io/app/b_ugmjhjghdkgnjux4lzkepvsfma) · [Web Guide](https://taladb.dev/guide/web) · [Node.js Guide](https://taladb.dev/guide/node) · [React Native Guide](https://taladb.dev/guide/react-native)**
+**[Documentation](https://taladb.dev) · [Web Demo](https://taladb-playground.vercel.app/) · [Mobile Demo](https://play.google.com/store/apps/details?id=dev.thinkgrid.kepta) · [Web Guide](https://taladb.dev/guide/web) · [Node.js Guide](https://taladb.dev/guide/node) · [React Native Guide](https://taladb.dev/guide/react-native)**
 
 </div>
 
@@ -53,6 +53,8 @@ Application code uses the unified `taladb` package with a single TypeScript API 
 |---|---|---|
 | Android (Kotlin) | [`taladb-kotlin`](https://github.com/tala-io/taladb-kotlin) · `dev.taladb:taladb-android` | JNI over the C FFI · [guide](https://taladb.dev/guide/android) |
 | iOS & macOS (Swift) | [`taladb-swift`](https://github.com/tala-io/taladb-swift) | SwiftPM over the C FFI · [guide](https://taladb.dev/guide/swift) |
+
+**Rust apps (early release).** The engine itself is the [`taladb`](https://crates.io/crates/taladb) crate: serde-typed documents, the same JSON filters as every platform, vector and full-text search, and live queries, embedded in any Rust application. See the [Rust guide](https://taladb.dev/guide/rust).
 
 ## Highlights
 

@@ -1,4 +1,4 @@
-use taladb_core::{Database, Filter, Update, Value};
+use taladb::{Database, Filter, Update, Value};
 
 fn i(n: i64) -> Value {
     Value::Int(n)
@@ -163,7 +163,7 @@ fn index_bounded_range_matches_unindexed_across_numeric_types() {
         ]);
         let mut a = indexed.find(filter.clone()).unwrap();
         let mut b = plain.find(filter).unwrap();
-        let key = |d: &taladb_core::Document| format!("{:?}", d.get("x"));
+        let key = |d: &taladb::Document| format!("{:?}", d.get("x"));
         a.sort_by_key(key);
         b.sort_by_key(key);
         assert_eq!(

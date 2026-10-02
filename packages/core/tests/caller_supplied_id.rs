@@ -12,14 +12,14 @@
 //! run twice if the caller controls the id.
 
 use std::sync::{Arc, Barrier};
-use taladb_core::document::Value;
-use taladb_core::{Database, Filter, TalaDbError};
+use taladb::document::Value;
+use taladb::{Database, Filter, TalaDbError};
 use ulid::Ulid;
 
 const ID_A: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
 const ID_B: &str = "01BX5ZZKBKACTAV9WEVGEMMVRZ";
 
-fn collection() -> (Database, taladb_core::Collection) {
+fn collection() -> (Database, taladb::Collection) {
     let db = Database::open_in_memory().unwrap();
     let col = db.collection("products").unwrap();
     (db, col)

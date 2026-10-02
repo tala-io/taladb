@@ -1,6 +1,15 @@
 # Changelog
 
-## 0.11.9— 2026-10-02
+
+## 0.12.0 — Unreleased
+
+- TalaDB for Rust: the engine is now the `taladb` crate, published to crates.io and usable as the local database of any Rust application.
+
+- Fixed retained HNSW nodes surviving graph replacement.
+
+- Added one configurable retained cache budget shared by exact vectors and HNSW graphs, with incremental clock eviction within graphs and LRU eviction between indexes. Defaults are 8 MiB on Android, iOS and WASM and 64 MiB on other native targets.
+
+## 0.11.9 — 2026-10-02
 
 Groundwork for first-party Kotlin and Swift packages that wrap the C FFI directly, without React Native. Those packages live in their own repositories (`tala-io/taladb-kotlin`, `tala-io/taladb-swift`) and consume prebuilt libraries from the GitHub release, so the C interface now carries an explicit version.
 

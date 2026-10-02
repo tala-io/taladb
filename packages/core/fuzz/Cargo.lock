@@ -717,8 +717,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "taladb-core"
-version = "0.11.2"
+name = "taladb"
+version = "0.12.0"
 dependencies = [
  "aes-gcm",
  "getrandom 0.4.3",
@@ -746,16 +746,16 @@ dependencies = [
  "libfuzzer-sys",
  "postcard",
  "serde_json",
- "taladb-core",
+ "taladb",
  "taladb-ffi",
 ]
 
 [[package]]
 name = "taladb-ffi"
-version = "0.11.2"
+version = "0.12.0"
 dependencies = [
  "serde_json",
- "taladb-core",
+ "taladb",
 ]
 
 [[package]]

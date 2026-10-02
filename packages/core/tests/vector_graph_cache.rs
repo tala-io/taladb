@@ -5,29 +5,18 @@
 //! that rewrites a graph: data writes (which move the vector revision), index
 //! create and drop, and rebuild.
 //!
-//! What the cache can and cannot break is worth being precise about, because it
-//! sets how much these tests can prove. The ANN path rescores every id the graph
-//! returns against the vector table in the current snapshot, so the graph only
-//! decides *which* candidates are considered — scores are always current and a
-//! deleted document cannot surface through a stale node. A stale cache is
-//! therefore a recall risk, not a correctness one, and attempts to make a stale
-//! cache return a wrong answer did not succeed: HNSW still reaches good
-//! neighbours through slightly wrong links.
-//!
-//! So these assertions pin the reachable contract — agreement with exact search,
-//! no resurrected documents, no cross-collection bleed — rather than proving the
-//! eviction in `rebuild_vector_index` is load-bearing. That eviction is
-//! deliberate defence; removing it does not fail these tests.
+//! ANN rescores candidates from the original vectors, so stale nodes affect
+//! candidate selection rather than returned scores. Larger quantization-change
+//! and staged-rebuild regressions live in `vector_performance.rs`; lease tests
+//! also verify that invalidation cannot be undone by an in-flight query.
 
-use taladb_core::{
-    Database, HnswOptions, Value, VectorMetric, VectorQueryOptions, VectorSearchMode,
-};
+use taladb::{Database, HnswOptions, Value, VectorMetric, VectorQueryOptions, VectorSearchMode};
 
 fn vec_val(v: &[f32]) -> Value {
     Value::Array(v.iter().map(|f| Value::Float(f64::from(*f))).collect())
 }
 
-fn insert_vec(col: &taladb_core::Collection, label: &str, v: &[f32]) {
+fn insert_vec(col: &taladb::Collection, label: &str, v: &[f32]) {
     col.insert(vec![
         ("label".into(), Value::Str(label.into())),
         ("emb".into(), vec_val(v)),
@@ -37,7 +26,7 @@ fn insert_vec(col: &taladb_core::Collection, label: &str, v: &[f32]) {
 
 /// A spread of 8-D unit-ish vectors, enough nodes for the graph to have links
 /// worth caching.
-fn seed(col: &taladb_core::Collection, n: usize, tag: &str) {
+fn seed(col: &taladb::Collection, n: usize, tag: &str) {
     for i in 0..n {
         let mut v = [0.0f32; 8];
         v[i % 8] = 1.0;
@@ -46,7 +35,7 @@ fn seed(col: &taladb_core::Collection, n: usize, tag: &str) {
     }
 }
 
-fn make_index(col: &taladb_core::Collection) {
+fn make_index(col: &taladb::Collection) {
     col.create_vector_index(
         "emb",
         8,
@@ -59,7 +48,7 @@ fn make_index(col: &taladb_core::Collection) {
     .unwrap();
 }
 
-fn labels(r: taladb_core::VectorQueryResult) -> Vec<String> {
+fn labels(r: taladb::VectorQueryResult) -> Vec<String> {
     r.hits
         .into_iter()
         .map(|h| match h.document.get("label") {
@@ -69,7 +58,7 @@ fn labels(r: taladb_core::VectorQueryResult) -> Vec<String> {
         .collect()
 }
 
-fn ann(col: &taladb_core::Collection, q: &[f32]) -> Vec<String> {
+fn ann(col: &taladb::Collection, q: &[f32]) -> Vec<String> {
     let opts = VectorQueryOptions {
         mode: VectorSearchMode::Ann,
         ef_search: Some(200),
@@ -78,7 +67,7 @@ fn ann(col: &taladb_core::Collection, q: &[f32]) -> Vec<String> {
     labels(col.search_vectors("emb", q, 5, None, &opts).unwrap())
 }
 
-fn exact(col: &taladb_core::Collection, q: &[f32]) -> Vec<String> {
+fn exact(col: &taladb::Collection, q: &[f32]) -> Vec<String> {
     let opts = VectorQueryOptions {
         mode: VectorSearchMode::Exact,
         ..Default::default()
@@ -142,7 +131,7 @@ fn deletes_then_rebuild_are_visible_through_the_cache() {
     assert!(!before.is_empty());
 
     let victim = before[0].clone();
-    col.delete_one(taladb_core::query::Filter::Eq(
+    col.delete_one(taladb::query::Filter::Eq(
         "label".into(),
         Value::Str(victim.clone()),
     ))
@@ -168,8 +157,8 @@ fn dropping_and_recreating_the_index_does_not_serve_stale_graph_nodes() {
     assert!(before.iter().all(|l| l.starts_with("old")));
 
     col.drop_vector_index("emb").unwrap();
-    for d in col.find(taladb_core::query::Filter::All).unwrap() {
-        col.delete_one(taladb_core::query::Filter::Eq(
+    for d in col.find(taladb::query::Filter::All).unwrap() {
+        col.delete_one(taladb::query::Filter::Eq(
             "_id".into(),
             Value::Str(d.id.to_string()),
         ))

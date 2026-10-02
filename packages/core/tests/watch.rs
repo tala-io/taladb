@@ -1,10 +1,10 @@
 use std::sync::Arc;
 use std::thread;
 
-use taladb_core::Database;
-use taladb_core::document::Value;
-use taladb_core::query::filter::Filter;
-use taladb_core::watch::{create_watch, new_registry, notify};
+use taladb::Database;
+use taladb::document::Value;
+use taladb::query::filter::Filter;
+use taladb::watch::{create_watch, new_registry, notify};
 
 fn s(v: &str) -> Value {
     Value::Str(v.to_string())
@@ -265,7 +265,7 @@ fn watch_closed_after_registry_dropped() {
     // try_next should return WatchClosed
     let result = handle.try_next();
     match result {
-        Err(taladb_core::TalaDbError::WatchClosed) => {}
+        Err(taladb::TalaDbError::WatchClosed) => {}
         // Channel may still appear empty if not yet noticed — that's also valid
         Ok(None) => {}
         other => panic!("expected WatchClosed or None, got: {other:?}"),
@@ -278,10 +278,10 @@ fn watch_closed_after_registry_dropped() {
 
 #[test]
 fn collection_watch_receives_snapshots_after_writes() {
-    use taladb_core::Value;
-    use taladb_core::collection::Update;
+    use taladb::Value;
+    use taladb::collection::Update;
 
-    let db = taladb_core::Database::open_in_memory().unwrap();
+    let db = taladb::Database::open_in_memory().unwrap();
     let col = db.collection("tasks").unwrap();
 
     let handle = col.watch(Filter::Eq("done".into(), Value::Bool(false)));
@@ -314,9 +314,9 @@ fn collection_watch_receives_snapshots_after_writes() {
 
 #[test]
 fn collection_watch_try_next_sees_deletes() {
-    use taladb_core::Value;
+    use taladb::Value;
 
-    let db = taladb_core::Database::open_in_memory().unwrap();
+    let db = taladb::Database::open_in_memory().unwrap();
     let col = db.collection("items").unwrap();
     let id = col.insert(vec![("x".into(), Value::Int(1))]).unwrap();
 

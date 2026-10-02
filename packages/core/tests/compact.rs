@@ -1,6 +1,6 @@
 //! Integration tests for Database::compact() — WAL compaction.
 
-use taladb_core::{Database, Filter, Update, Value};
+use taladb::{Database, Filter, Update, Value};
 
 fn s(v: &str) -> Value {
     Value::Str(v.to_string())

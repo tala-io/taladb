@@ -14,7 +14,7 @@
 //! `migrate_encrypted_v0_to_v1`. Do not "fix" these numbers to match new output.
 #![cfg(feature = "encryption")]
 
-use taladb_core::crypto::{MIN_PBKDF2_ITERATIONS, decrypt, derive_key, encrypt};
+use taladb::crypto::{MIN_PBKDF2_ITERATIONS, decrypt, derive_key, encrypt};
 
 const PASSPHRASE: &str = "correct horse battery staple";
 const SALT: &[u8; 16] = b"0123456789abcdef";

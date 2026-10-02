@@ -13,15 +13,15 @@
 //!
 //! Backfill is the documented exception — see `vector_backfill.rs`.
 
-use taladb_core::Database;
-use taladb_core::document::Value;
-use taladb_core::vector::VectorMetric;
+use taladb::Database;
+use taladb::document::Value;
+use taladb::vector::VectorMetric;
 
 fn vec_field(v: &[f32]) -> Value {
     Value::Array(v.iter().map(|f| Value::Float(f64::from(*f))).collect())
 }
 
-fn indexed_collection(db: &Database) -> taladb_core::Collection {
+fn indexed_collection(db: &Database) -> taladb::Collection {
     let col = db.collection("docs").unwrap();
     col.create_vector_index("embedding", 4, Some(VectorMetric::Cosine), None)
         .unwrap();
@@ -40,7 +40,7 @@ fn insert_with_a_wrong_dimension_vector_is_rejected() {
     assert!(
         matches!(
             err,
-            taladb_core::TalaDbError::VectorDimensionMismatch {
+            taladb::TalaDbError::VectorDimensionMismatch {
                 expected: 4,
                 got: 3
             }
@@ -48,7 +48,7 @@ fn insert_with_a_wrong_dimension_vector_is_rejected() {
         "expected a dimension mismatch, got {err:?}"
     );
     assert_eq!(
-        col.count(taladb_core::Filter::All).unwrap(),
+        col.count(taladb::Filter::All).unwrap(),
         0,
         "the rejected write must not leave the document behind"
     );
@@ -66,7 +66,7 @@ fn insert_many_rejects_the_whole_batch() {
 
     assert!(err.is_err(), "a bad vector anywhere fails the batch");
     assert_eq!(
-        col.count(taladb_core::Filter::All).unwrap(),
+        col.count(taladb::Filter::All).unwrap(),
         0,
         "the transaction rolls back — no partial batch is committed"
     );
@@ -83,8 +83,8 @@ fn update_to_a_wrong_dimension_vector_is_rejected_and_leaves_the_old_one() {
     .unwrap();
 
     let err = col.update_one(
-        taladb_core::Filter::Eq("k".into(), Value::Str("a".into())),
-        taladb_core::Update::Set(vec![("embedding".into(), vec_field(&[1.0, 2.0]))]),
+        taladb::Filter::Eq("k".into(), Value::Str("a".into())),
+        taladb::Update::Set(vec![("embedding".into(), vec_field(&[1.0, 2.0]))]),
     );
     assert!(
         err.is_err(),
@@ -116,7 +116,7 @@ fn a_missing_or_null_vector_field_is_still_allowed() {
     .unwrap();
 
     assert_eq!(
-        col.count(taladb_core::Filter::All).unwrap(),
+        col.count(taladb::Filter::All).unwrap(),
         2,
         "documents awaiting an embedding are ordinary documents"
     );

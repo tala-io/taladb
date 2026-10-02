@@ -1,6 +1,6 @@
 //! Integration tests for the portable persistent HNSW vector index.
 
-use taladb_core::{Database, Filter, HnswOptions, Value, VectorMetric};
+use taladb::{Database, Filter, HnswOptions, Value, VectorMetric};
 
 fn vec_val(floats: &[f64]) -> Value {
     Value::Array(floats.iter().map(|&f| Value::Float(f)).collect())
@@ -164,7 +164,7 @@ fn drop_vector_index_clears_graph() {
         .find_nearest("emb", &fv(&[1.0, 0.0, 0.0, 0.0]), 1, None)
         .unwrap_err();
     assert!(
-        matches!(err, taladb_core::TalaDbError::VectorIndexNotFound(_)),
+        matches!(err, taladb::TalaDbError::VectorIndexNotFound(_)),
         "expected VectorIndexNotFound, got {err:?}"
     );
 }

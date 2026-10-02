@@ -1,4 +1,4 @@
-use taladb_core::{
+use taladb::{
     Database, Filter, GraphOptions, HnswOptions, Quantization, Update, Value, VectorMetric,
     VectorQueryOptions, VectorSearchMode,
 };
@@ -373,7 +373,7 @@ fn legacy_index_is_visible_and_upgrade_actually_promotes_flat() {
     {
         let mut txn = db.backend().begin_write().unwrap();
         txn.put(
-            taladb_core::vector::META_HNSW_TABLE,
+            taladb::vector::META_HNSW_TABLE,
             b"docs::v",
             &postcard::to_allocvec(&HnswOptions::default()).unwrap(),
         )

@@ -49,7 +49,7 @@ impl VectorBlock {
     }
 }
 /// Maximum retained decoded vector bytes per database. Oversized indexes stream.
-pub const DEFAULT_VECTOR_CACHE_BYTES: usize = 64 * 1024 * 1024;
+pub const DEFAULT_VECTOR_CACHE_BYTES: usize = crate::search_cache::DEFAULT_SEARCH_CACHE_BYTES;
 
 #[derive(PartialEq)]
 pub(crate) struct Candidate(pub ulid::Ulid, pub f32);

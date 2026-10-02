@@ -14,8 +14,8 @@
 //! encoder removes the I/O and leaves the growth curve itself, where the two are
 //! far apart.
 
-use taladb_core::index::{encode_compound_keys, encode_index_keys};
-use taladb_core::{Database, Filter, Ulid, document::Value};
+use taladb::index::{encode_compound_keys, encode_index_keys};
+use taladb::{Database, Filter, Ulid, document::Value};
 
 fn array_of(n: usize) -> Value {
     Value::Array((0..n).map(|i| Value::Int(i as i64)).collect())

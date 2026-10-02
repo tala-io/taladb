@@ -1,5 +1,5 @@
 [package]
-name = "taladb-core"
+name = "taladb"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -7,9 +7,10 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 rust-version.workspace = true
-description = "TalaDB core: embedded local-first document database powered by redb"
+description = "Embedded, local-first document and vector database: serde documents, JSON filters, vector, full-text and hybrid search, live queries"
 readme = "README.md"
-keywords = ["database", "embedded", "local-first", "vector-search", "wasm"]
+documentation = "https://docs.rs/taladb"
+keywords = ["database", "embedded", "local-first", "vector-search", "document"]
 categories = ["database-implementations", "wasm", "data-structures"]
 
 [lints]

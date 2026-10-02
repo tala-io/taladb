@@ -141,7 +141,13 @@ impl WorkerDB {
                 .map_err(|e| JsValue::from_str(&e.to_string()))?,
             _ => Database::open_in_memory().map_err(|e| JsValue::from_str(&e.to_string()))?,
         };
-        let _ = config_json;
+        if let Some(json) = config_json {
+            let config: taladb_core::TalaDbConfig = serde_json::from_str(&json)
+                .map_err(|e| JsValue::from_str(&format!("invalid config JSON: {e}")))?;
+            if let Some(bytes) = config.vector_cache_bytes {
+                db.set_vector_cache_budget(bytes);
+            }
+        }
         Ok(Self { db })
     }
 
@@ -240,7 +246,13 @@ impl WorkerDB {
 
         let db = Database::open_with_backend(backend)
             .map_err(|e: taladb_core::TalaDbError| JsValue::from_str(&e.to_string()))?;
-        let _ = config_json;
+        if let Some(json) = config_json {
+            let config: taladb_core::TalaDbConfig = serde_json::from_str(&json)
+                .map_err(|e| JsValue::from_str(&format!("invalid config JSON: {e}")))?;
+            if let Some(bytes) = config.vector_cache_bytes {
+                db.set_vector_cache_budget(bytes);
+            }
+        }
         Ok(Self { db })
     }
 

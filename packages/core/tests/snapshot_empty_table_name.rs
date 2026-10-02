@@ -10,7 +10,7 @@
 //! process instead of returning `Err` — in a function whose whole purpose is to
 //! take untrusted bytes from disk or the network.
 
-use taladb_core::{Database, TalaDbError};
+use taladb::{Database, TalaDbError};
 
 /// The exact 48 bytes libFuzzer minimised to, kept verbatim so the test fails
 /// again if the guard is removed.
@@ -67,8 +67,8 @@ fn a_real_snapshot_still_round_trips() {
     let db = Database::open_in_memory().expect("open");
     let col = db.collection("books").expect("collection");
     col.insert(vec![
-        ("title".to_string(), taladb_core::Value::Str("Dune".into())),
-        ("year".to_string(), taladb_core::Value::Int(1965)),
+        ("title".to_string(), taladb::Value::Str("Dune".into())),
+        ("year".to_string(), taladb::Value::Int(1965)),
     ])
     .expect("insert");
     col.create_index("year").expect("index");
@@ -79,7 +79,7 @@ fn a_real_snapshot_still_round_trips() {
     let found = restored
         .collection("books")
         .expect("collection")
-        .find(taladb_core::Filter::All)
+        .find(taladb::Filter::All)
         .expect("find");
     assert_eq!(found.len(), 1, "the restored database should hold the row");
 }

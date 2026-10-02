@@ -24,7 +24,7 @@
           <a href="https://demo-web.taladb.dev/" class="btn btn-secondary" target="_blank" rel="noopener">
             Web Demo →
           </a>
-          <a href="https://appetize.io/app/b_ugmjhjghdkgnjux4lzkepvsfma" class="btn btn-secondary" target="_blank" rel="noopener">
+          <a href="https://play.google.com/store/apps/details?id=dev.thinkgrid.kepta" class="btn btn-secondary" target="_blank" rel="noopener">
             Mobile Demo →
           </a>
           <a href="https://github.com/tala-io/taladb" class="btn btn-ghost" target="_blank" rel="noopener">

@@ -263,8 +263,8 @@ async function main() {
   }
 
   // 3. Vector search ---------------------------------------------------------
-  // The published @taladb/web binary is flat-only (no vector-hnsw feature),
-  // so every findNearest is an exact scan.
+  // This suite creates flat indexes explicitly, so these queries use exact
+  // scans. Portable HNSW is also available in the browser.
   {
     section(`Vector search — ${DIMS}-dim, cosine, top-${TOP_K} (flat index)`)
     for (const N of VECTOR_NS) {

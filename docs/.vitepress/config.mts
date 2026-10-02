@@ -106,11 +106,11 @@ export default defineConfig({
         text: "Live Demo",
         items: [
           { text: "Web Demo", link: "https://demo-web.taladb.dev/" },
-          { text: "Mobile Demo", link: "https://appetize.io/app/b_ugmjhjghdkgnjux4lzkepvsfma" },
+          { text: "Mobile Demo", link: "https://play.google.com/store/apps/details?id=dev.thinkgrid.kepta" },
         ],
       },
       {
-        text: "v0.11.9",
+        text: "v0.12.0",
         items: [
           {
             text: "Changelog",
@@ -145,6 +145,7 @@ export default defineConfig({
           { text: "React Native", link: "/guide/react-native" },
           { text: "Android (Kotlin) · early", link: "/guide/android" },
           { text: "iOS & macOS (Swift) · early", link: "/guide/swift" },
+          { text: "Rust · early", link: "/guide/rust" },
           { text: "CLI Dev Tools", link: "/guide/cli" },
         ],
       },
