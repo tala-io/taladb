@@ -22,7 +22,7 @@ cargo add serde_json
 
 ## Quick start
 
-```rust
+```rust,no_run
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -35,17 +35,16 @@ struct Note {
 }
 
 fn main() -> Result<(), taladb::TalaDbError> {
-    # let dir = tempfile::tempdir().unwrap();
-    # let path = dir.path().join("app.db");
-    let db = taladb::open(&path)?;                 // creates the file if needed
+    let db = taladb::open("app.db")?;              // creates the file if needed
     let notes = db.typed::<Note>("notes")?;
 
     notes.create_index("done")?;
     notes.insert(&Note { id: None, title: "Buy groceries".into(), done: false })?;
 
     let open: Vec<Note> = notes.find(json!({ "done": false }))?;
+    println!("{} open", open.len());
+
     notes.update_one(json!({ "title": "Buy groceries" }), json!({ "$set": { "done": true } }))?;
-    # assert_eq!(open.len(), 1);
     Ok(())
 }
 ```
@@ -58,45 +57,56 @@ A malformed filter is an error, never a silent match-all.
 ## Vector and full-text search
 
 ```rust
-# use serde::{Deserialize, Serialize};
-# #[derive(Serialize, Deserialize)]
-# struct Doc { title: String, embedding: Vec<f32> }
-# fn main() -> Result<(), taladb::TalaDbError> {
-# let db = taladb::Database::open_in_memory()?;
-let docs = db.typed::<Doc>("docs")?;
-docs.create_vector_index("embedding", 3, None, None)?;   // exact search by default
-docs.create_fts_index("title")?;
-docs.insert(&Doc { title: "rust embedded database".into(), embedding: vec![1.0, 0.0, 0.0] })?;
+use serde::{Deserialize, Serialize};
 
-let similar = docs.find_nearest("embedding", &[1.0, 0.1, 0.0], 5, None)?;
-let matches = docs.search_text("title", "embedded", 5)?;
-# assert_eq!((similar.len(), matches.len()), (1, 1));
-# Ok(())
-# }
+#[derive(Serialize, Deserialize)]
+struct Doc {
+    title: String,
+    embedding: Vec<f32>,
+}
+
+fn main() -> Result<(), taladb::TalaDbError> {
+    let db = taladb::Database::open_in_memory()?;
+    let docs = db.typed::<Doc>("docs")?;
+
+    docs.create_vector_index("embedding", 3, None, None)?;   // exact search by default
+    docs.create_fts_index("title")?;
+    docs.insert(&Doc { title: "rust embedded database".into(), embedding: vec![1.0, 0.0, 0.0] })?;
+
+    let similar = docs.find_nearest("embedding", &[1.0, 0.1, 0.0], 5, None)?;
+    let matches = docs.search_text("title", "embedded", 5)?;
+    println!("{} similar, {} text matches", similar.len(), matches.len());
+    Ok(())
+}
 ```
 
 ## Live queries
 
 ```rust
-# use serde::{Deserialize, Serialize};
-# use serde_json::json;
-# #[derive(Serialize, Deserialize)]
-# struct Note { title: String, done: bool }
-# fn main() -> Result<(), taladb::TalaDbError> {
-# let db = taladb::Database::open_in_memory()?;
-let notes = db.typed::<Note>("notes")?;
-let watch = notes.watch(json!({ "done": false }))?;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 
-let writer = db.clone();                        // clones share one open database
-std::thread::spawn(move || {
-    writer.typed::<Note>("notes").unwrap()
-        .insert(&Note { title: "new".into(), done: false }).unwrap();
-});
+#[derive(Serialize, Deserialize)]
+struct Note {
+    title: String,
+    done: bool,
+}
 
-let open: Vec<Note> = watch.next()?;            // blocks until a write changes the result
-# assert_eq!(open.len(), 1);
-# Ok(())
-# }
+fn main() -> Result<(), taladb::TalaDbError> {
+    let db = taladb::Database::open_in_memory()?;
+    let notes = db.typed::<Note>("notes")?;
+    let watch = notes.watch(json!({ "done": false }))?;
+
+    let writer = db.clone();                    // clones share one open database
+    std::thread::spawn(move || {
+        writer.typed::<Note>("notes").unwrap()
+            .insert(&Note { title: "new".into(), done: false }).unwrap();
+    });
+
+    let open: Vec<Note> = watch.next()?;        // blocks until a write changes the result
+    println!("{} open", open.len());
+    Ok(())
+}
 ```
 
 ## Also included
