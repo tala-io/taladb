@@ -1,13 +1,14 @@
 # cbindgen configuration for taladb-ffi.
-# Run: cbindgen --config cbindgen.toml --crate taladb-ffi --output ../cpp/taladb.h
+# Run: scripts/gen-header.sh  (writes include/taladb.h and the React Native copy)
 # (or `pnpm --filter @taladb/react-native build:cbindgen`)
 
 language = "C"
 include_guard = "TALADB_FFI_H"
 pragma_once = true
 
-# The header is included from C++ (TalaDBHostObject.cpp, TalaDBJni.cpp, and the
-# iOS TalaDB.mm) but every symbol is plain C. Without this, cbindgen emits no
+# The header is included from C++ (the React Native TalaDBHostObject.cpp,
+# TalaDBJni.cpp and iOS TalaDB.mm) as well as from C, Swift and the Kotlin JNI
+# shim, but every symbol is plain C. Without this, cbindgen emits no
 # `extern "C"` block and every call fails to link against the Rust staticlib
 # under C++ name mangling.
 cpp_compat = true
@@ -18,18 +19,26 @@ after_includes = ""
 
 # Prepended verbatim. Lives here rather than in the .h so that regenerating the
 # header cannot silently drop it — the per-function documentation below is
-# generated from the doc comments in rust/src/lib.rs.
+# generated from the doc comments in src/lib.rs.
 header = """
 /*
  * TalaDB C FFI header.
  *
  * GENERATED FILE — do not edit. Regenerate with:
- *   pnpm --filter @taladb/react-native build:cbindgen
- * CI fails if this file and rust/src/lib.rs disagree.
+ *   packages/bindings/ffi/scripts/gen-header.sh
+ * CI fails if this file and packages/bindings/ffi/src/lib.rs disagree.
  *
- * This is the stable C interface between the Rust taladb-ffi crate and the C++
- * JSI HostObject (cpp/TalaDBHostObject.cpp, cpp/TalaDBJni.cpp) and the iOS
- * TurboModule (ios/TalaDB.mm).
+ * This is the stable C interface of the Rust taladb-ffi crate. Its consumers
+ * are the React Native JSI HostObject and TurboModule in this repository and
+ * the native Swift (tala-io/taladb-swift) and Kotlin (tala-io/taladb-kotlin)
+ * packages, which ship as separate repositories.
+ *
+ * Compatibility
+ * -------------
+ *  TALADB_FFI_ABI_VERSION changes whenever a signature in this file changes
+ *  incompatibly. A wrapper compiled against this header must check that
+ *  taladb_ffi_abi_version() returns the same value before calling anything
+ *  else; a mismatch means the library and header came from different releases.
  *
  * Ownership rules
  * ---------------

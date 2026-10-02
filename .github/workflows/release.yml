@@ -336,7 +336,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-rn-ios-
 
       - name: Build iOS targets
-        working-directory: packages/bindings/react-native/rust
+        working-directory: packages/bindings/ffi
         run: |
           cargo build --release --target aarch64-apple-ios
           cargo build --release --target aarch64-apple-ios-sim
@@ -406,16 +406,64 @@ jobs:
         run: cargo install cargo-ndk --locked --force
 
       - name: Build Android targets
-        working-directory: packages/bindings/react-native/rust
+        working-directory: packages/bindings/ffi
         run: |
           cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 \
-            -o ../android/src/main/jniLibs \
+            -o ../react-native/android/src/main/jniLibs \
             build --release
+          # `-o` copies every cdylib in the build — including
+          # libredb-<hash>.so, because redb 2.x (the legacy-migration
+          # dependency) declares a cdylib crate type. libtaladb_ffi.so links
+          # redb statically and never loads it, so it only added ~500 KB per
+          # 64-bit ABI to every app.
+          find ../react-native/android/src/main/jniLibs -name '*.so' ! -name libtaladb_ffi.so -print -delete
+
+      # Google Play rejects apps whose 64-bit libraries are not 16 KB aligned,
+      # and a 16 KB-page device cannot load them at all. The flag lives in
+      # .cargo/config.toml; this proves it reached the linker, because a
+      # RUSTFLAGS override or a cargo-ndk change would drop it silently.
+      - name: libtaladb_ffi.so is 16 KB page aligned
+        run: |
+          set -euo pipefail
+          for so in packages/bindings/react-native/android/src/main/jniLibs/*/libtaladb_ffi.so; do
+            aligns="$(readelf -lW "$so" | awk '$1 == "LOAD" { print $NF }')"
+            echo "$so: $(echo $aligns)"
+            for a in $aligns; do
+              if (( a < 0x4000 )); then
+                echo "::error::$so has a LOAD segment aligned to $a; expected >= 0x4000"
+                exit 1
+              fi
+            done
+          done
 
       - uses: actions/upload-artifact@v4
         with:
           name: release-rn-android
           path: packages/bindings/react-native/android/src/main/jniLibs/
+
+      # The same libraries, packaged for the native Kotlin package
+      # (tala-io/taladb-kotlin), which downloads this archive from the GitHub
+      # release and verifies it against the published SHA-256. The header
+      # travels with the binaries so the JNI shim is always compiled against
+      # the exact interface the library exports.
+      - name: Package native Android archive
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          STAGE="$RUNNER_TEMP/taladb-ffi-android-$VERSION"
+          mkdir -p "$STAGE/include"
+          cp -R packages/bindings/react-native/android/src/main/jniLibs "$STAGE/jniLibs"
+          cp packages/bindings/ffi/include/taladb.h "$STAGE/include/"
+          cp LICENSE-MIT LICENSE-APACHE "$STAGE/"
+          mkdir -p dist-native
+          (cd "$RUNNER_TEMP" && zip -qr "$GITHUB_WORKSPACE/dist-native/taladb-ffi-android-$VERSION.zip" "taladb-ffi-android-$VERSION")
+          (cd dist-native && sha256sum "taladb-ffi-android-$VERSION.zip" > "taladb-ffi-android-$VERSION.zip.sha256")
+          cat dist-native/*.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-android
+          path: dist-native/
 
   # ---------------------------------------------------------------------------
   # Build — taladb TypeScript package (tsup)
@@ -626,18 +674,18 @@ jobs:
   github-release:
     name: GitHub Release
     runs-on: ubuntu-latest
-    needs: [publish-npm]
+    needs: [publish-npm, build-rn-android]
     permissions:
       contents: write
 
     steps:
       - uses: actions/checkout@v4
 
-      # Only the CLI belongs on the GitHub release. Every library ships via npm —
-      # the native packages (@taladb/node, @taladb/web, @taladb/react-native)
-      # embed their own binaries — so the wasm/xcframework/jniLibs/dist artifacts
-      # here would just be loose duplicates. taladb-cli is the one artifact with
-      # no npm channel; docs/features.md points users to Releases for it.
+      # The GitHub release carries what has no npm channel: the CLI, and the
+      # native library archive the Kotlin package (tala-io/taladb-kotlin)
+      # downloads. The npm packages (@taladb/node, @taladb/web,
+      # @taladb/react-native) embed their own binaries, so their wasm, xcframework
+      # and jniLibs artifacts are not attached — they would be loose duplicates.
       #
       # `release-taladb-*-*` selects exactly the platform CLI builds
       # (release-taladb-x86_64-unknown-linux-gnu, -aarch64-apple-darwin,
@@ -652,6 +700,12 @@ jobs:
           pattern: release-taladb-*-*
           path: /tmp/release-assets
           merge-multiple: true
+
+      - name: Download native Android archive
+        uses: actions/download-artifact@v4
+        with:
+          name: native-android
+          path: /tmp/release-assets
 
       # Published as a release asset so the documented one-liner —
       # releases/latest/download/install.sh — resolves without a version.
@@ -670,3 +724,38 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }} # v1.0.0-beta.1 → pre-release
           generate_release_notes: true
           files: /tmp/release-assets/*
+
+  # ---------------------------------------------------------------------------
+  # Notify the native package repositories
+  # ---------------------------------------------------------------------------
+  # The Kotlin package lives in its own repository and pins an engine release by
+  # URL and SHA-256. This tells it a new archive exists; a workflow there opens
+  # the bump PR and runs its tests against it, so a release that breaks the
+  # wrapper is caught there rather than by its users.
+  #
+  # Needs NATIVE_PACKAGES_DISPATCH_TOKEN — a fine-grained token with
+  # Contents: write on tala-io/taladb-kotlin. Skipped, not failed, while the
+  # secret is unset, so a release never blocks on it.
+  notify-native-packages:
+    name: Notify native packages
+    runs-on: ubuntu-latest
+    needs: [github-release]
+    env:
+      DISPATCH_TOKEN: ${{ secrets.NATIVE_PACKAGES_DISPATCH_TOKEN }}
+
+    steps:
+      - name: Dispatch taladb-release to tala-io/taladb-kotlin
+        if: env.DISPATCH_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ secrets.NATIVE_PACKAGES_DISPATCH_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          ASSET="taladb-ffi-android-$VERSION.zip"
+          BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
+          SHA256="$(curl -fsSL "$BASE/$ASSET.sha256" | cut -d' ' -f1)"
+          gh api repos/tala-io/taladb-kotlin/dispatches \
+            -f event_type=taladb-release \
+            -f "client_payload[version]=$VERSION" \
+            -f "client_payload[url]=$BASE/$ASSET" \
+            -f "client_payload[sha256]=$SHA256"

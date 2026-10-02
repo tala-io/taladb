@@ -6,7 +6,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PACKAGE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-RUST_DIR="$PACKAGE_DIR/rust"
+RUST_DIR="$PACKAGE_DIR/../ffi"
 OUT_DIR="$PACKAGE_DIR/ios"
 
 # Ensure iOS targets are installed

@@ -427,17 +427,13 @@ jobs:
         with:
           tool: cbindgen
 
-      # cpp/taladb.h is generated. If it disagrees with the Rust, the C++ is
+      # taladb.h is generated, and shipped twice: ffi/include/taladb.h for the
+      # Swift and Kotlin packages and the release archives, and a copy in the
+      # React Native package. If either disagrees with the Rust, its consumer is
       # compiling against a signature the library does not export — which links
       # fine and corrupts the stack at run time.
-      - name: cpp/taladb.h matches the Rust FFI
-        working-directory: packages/bindings/react-native/rust
-        run: |
-          cbindgen --config cbindgen.toml --crate taladb-ffi --output /tmp/taladb.generated.h
-          if ! diff -u ../cpp/taladb.h /tmp/taladb.generated.h; then
-            echo "::error file=packages/bindings/react-native/cpp/taladb.h::Header is stale. Run: pnpm --filter @taladb/react-native build:cbindgen"
-            exit 1
-          fi
+      - name: taladb.h matches the Rust FFI
+        run: packages/bindings/ffi/scripts/gen-header.sh --check
 
       - name: Compile the JSI HostObject and JNI bridge
         run: |

@@ -26,7 +26,7 @@
         </a>
       </div>
       <div class="cta-links">
-        <a href="https://github.com/tala-sh/taladb" target="_blank" rel="noopener">GitHub</a>
+        <a href="https://github.com/tala-io/taladb" target="_blank" rel="noopener">GitHub</a>
         <span>·</span>
         <a href="https://www.npmjs.com/package/taladb" target="_blank" rel="noopener">npm</a>
         <span>·</span>

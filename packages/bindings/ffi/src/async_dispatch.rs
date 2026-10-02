@@ -1,4 +1,5 @@
-//! Operations executed by the bounded native job executor, off the JS thread.
+//! The JSON operation table behind `taladb_call` (synchronous, on the caller's
+//! thread) and `taladb_call_start` (the bounded job executor, off the JS thread).
 use super::*;
 use serde_json::{Value as Json, json};
 

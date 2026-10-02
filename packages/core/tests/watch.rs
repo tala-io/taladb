@@ -330,3 +330,60 @@ fn collection_watch_try_next_sees_deletes() {
         .expect("delete must notify watchers");
     assert!(snapshot.is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// Bursts larger than the channel — coalesce, never disconnect
+// ---------------------------------------------------------------------------
+
+/// Events carry no payload and every receive re-runs the query, so a full
+/// channel already guarantees the subscriber will wake and see the latest
+/// state. Dropping it instead — which `notify` used to do once 64 events were
+/// queued — silently ended a live query after any burst of writes its
+/// consumer had not yet caught up with.
+#[test]
+fn a_burst_larger_than_the_channel_keeps_the_watch_alive() {
+    let db = Database::open_in_memory().unwrap();
+    let col = db.collection("burst").unwrap();
+    let handle = col.watch(Filter::All);
+
+    for n in 0..200i64 {
+        col.insert(vec![("n".into(), i(n))]).unwrap();
+    }
+
+    let snapshot = handle.next().expect("the watch must survive the burst");
+    assert_eq!(
+        snapshot.len(),
+        200,
+        "one coalesced snapshot of the latest state"
+    );
+    assert!(
+        handle.try_next().unwrap().is_none(),
+        "the burst was drained"
+    );
+
+    col.insert(vec![("n".into(), i(200))]).unwrap();
+    assert_eq!(handle.next().unwrap().len(), 201, "and it keeps delivering");
+}
+
+#[test]
+fn next_timeout_returns_none_without_a_write_and_a_snapshot_after_one() {
+    use std::time::Duration;
+
+    let db = Database::open_in_memory().unwrap();
+    let col = db.collection("timed").unwrap();
+    let handle = col.watch(Filter::All);
+
+    assert!(
+        handle
+            .next_timeout(Duration::from_millis(20))
+            .unwrap()
+            .is_none()
+    );
+
+    col.insert(vec![("name".into(), s("a"))]).unwrap();
+    let snapshot = handle
+        .next_timeout(Duration::from_millis(20))
+        .unwrap()
+        .expect("a write before the call is delivered");
+    assert_eq!(snapshot.len(), 1);
+}
