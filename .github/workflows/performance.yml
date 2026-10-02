@@ -30,7 +30,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # x64 and arm64: an x64-only benchmark hides vectorisation losses that
+        # hit aarch64 (and phones) hard — see the 2026-09-20 cosine regression.
+        os: [ubuntu-latest, ubuntu-24.04-arm]
         quantization: [none, binary]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -41,8 +43,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      # The arm64 runner image is not guaranteed to ship rustup the way the x64
+      # one does; install it when missing, then let rust-toolchain.toml pin it.
       - name: Sync pinned toolchain
-        run: rustup show active-toolchain || rustup toolchain install
+        run: |
+          if ! command -v rustup >/dev/null; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - name: Prepare baseline
         env:
