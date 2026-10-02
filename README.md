@@ -47,6 +47,13 @@ The same Rust core powers all three runtimes:
 
 Application code uses the unified `taladb` package with a single TypeScript API on every platform.
 
+**Native apps (early release).** Android apps in Kotlin and iOS/macOS apps in Swift can use the same engine without React Native, through first-party packages over the C FFI. Both are early releases: their APIs may still change, and they are not yet published to Maven Central or tagged for SwiftPM.
+
+| Platform | Package | Mechanism |
+|---|---|---|
+| Android (Kotlin) | [`taladb-kotlin`](https://github.com/tala-io/taladb-kotlin) · `dev.taladb:taladb-android` | JNI over the C FFI · [guide](https://taladb.dev/guide/android) |
+| iOS & macOS (Swift) | [`taladb-swift`](https://github.com/tala-io/taladb-swift) | SwiftPM over the C FFI · [guide](https://taladb.dev/guide/swift) |
+
 ## Highlights
 
 - **Vector search** — exact k-NN by default (cosine, dot, euclidean) with no recall trade-off, plus optional HNSW when scale demands it; pairs directly with on-device embedding models (transformers.js, ONNX Runtime Web)

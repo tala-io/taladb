@@ -15,6 +15,10 @@ it throws a clear error until the JSI HostObject exposes the version accessors
 (tracked on the [roadmap](/roadmap)). This is separate from TalaDB's **built-in
 storage migrations** (index-encoding format, etc.), which run automatically at
 every open with no configuration — you never write those.
+
+The native [Kotlin](/guide/android#migrations) and
+[Swift](/guide/swift#migrations) packages (early release) run migrations the
+same way, passed to their `open`.
 :::
 
 ## How migrations work
