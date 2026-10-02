@@ -324,7 +324,7 @@ jobs:
         run: rustup show active-toolchain || rustup toolchain install
 
       - name: Add build targets
-        run: rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+        run: rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios aarch64-apple-darwin x86_64-apple-darwin
 
       - uses: actions/cache@v4
         with:
@@ -341,6 +341,10 @@ jobs:
           cargo build --release --target aarch64-apple-ios
           cargo build --release --target aarch64-apple-ios-sim
           cargo build --release --target x86_64-apple-ios
+          # macOS slices are for the Swift package only: they let it build and
+          # run `swift test` on a Mac, and serve macOS apps.
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
 
       - name: Create simulator fat library and xcframework
         run: |
@@ -362,6 +366,40 @@ jobs:
         with:
           name: release-rn-ios
           path: packages/bindings/react-native/ios/TalaDBFfi.xcframework
+
+      # The Swift package (tala-io/taladb-swift) links this through a SwiftPM
+      # binaryTarget pinned by URL and checksum. Unlike the React Native
+      # xcframework above, its Headers carry only taladb.h and the module map,
+      # so Swift can `import TalaDBFFI` — the RN one also ships the C++
+      # HostObject sources, which a module map must not see.
+      - name: Swift xcframework (iOS, iOS simulator, macOS)
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          lipo -create \
+            target/aarch64-apple-darwin/release/libtaladb_ffi.a \
+            target/x86_64-apple-darwin/release/libtaladb_ffi.a \
+            -output /tmp/libtaladb_ffi_macos.a
+          HEADERS="$RUNNER_TEMP/swift-headers"
+          mkdir -p "$HEADERS"
+          cp packages/bindings/ffi/include/taladb.h packages/bindings/ffi/include/module.modulemap "$HEADERS/"
+          mkdir -p dist-swift
+          xcodebuild -create-xcframework \
+            -library target/aarch64-apple-ios/release/libtaladb_ffi.a -headers "$HEADERS" \
+            -library /tmp/libtaladb_ffi_sim.a -headers "$HEADERS" \
+            -library /tmp/libtaladb_ffi_macos.a -headers "$HEADERS" \
+            -output dist-swift/TalaDBFFI.xcframework
+          cd dist-swift
+          ZIP="TalaDBFFI-$VERSION.xcframework.zip"
+          ditto -c -k --sequesterRsrc --keepParent TalaDBFFI.xcframework "$ZIP"
+          swift package compute-checksum "$ZIP" > "$ZIP.checksum"
+          rm -rf TalaDBFFI.xcframework
+          cat "$ZIP.checksum"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-swift
+          path: dist-swift/
 
   # ---------------------------------------------------------------------------
   # Build React Native Android shared libraries (arm64-v8a, armeabi-v7a, x86_64)
@@ -674,7 +712,7 @@ jobs:
   github-release:
     name: GitHub Release
     runs-on: ubuntu-latest
-    needs: [publish-npm, build-rn-android]
+    needs: [publish-npm, build-rn-android, build-rn-ios]
     permissions:
       contents: write
 
@@ -682,8 +720,8 @@ jobs:
       - uses: actions/checkout@v4
 
       # The GitHub release carries what has no npm channel: the CLI, and the
-      # native library archive the Kotlin package (tala-io/taladb-kotlin)
-      # downloads. The npm packages (@taladb/node, @taladb/web,
+      # native library archives the Kotlin and Swift packages
+      # (tala-io/taladb-kotlin, tala-io/taladb-swift) download. The npm packages (@taladb/node, @taladb/web,
       # @taladb/react-native) embed their own binaries, so their wasm, xcframework
       # and jniLibs artifacts are not attached — they would be loose duplicates.
       #
@@ -707,6 +745,12 @@ jobs:
           name: native-android
           path: /tmp/release-assets
 
+      - name: Download Swift xcframework
+        uses: actions/download-artifact@v4
+        with:
+          name: native-swift
+          path: /tmp/release-assets
+
       # Published as a release asset so the documented one-liner —
       # releases/latest/download/install.sh — resolves without a version.
       - name: Stage installer
@@ -728,14 +772,14 @@ jobs:
   # ---------------------------------------------------------------------------
   # Notify the native package repositories
   # ---------------------------------------------------------------------------
-  # The Kotlin package lives in its own repository and pins an engine release by
-  # URL and SHA-256. This tells it a new archive exists; a workflow there opens
-  # the bump PR and runs its tests against it, so a release that breaks the
-  # wrapper is caught there rather than by its users.
+  # The Kotlin and Swift packages live in their own repositories and pin an
+  # engine release by URL and checksum. This tells each that a new archive
+  # exists; a workflow there opens the bump PR and runs its tests against it,
+  # so a release that breaks a wrapper is caught there rather than by its users.
   #
   # Needs NATIVE_PACKAGES_DISPATCH_TOKEN — a fine-grained token with
-  # Contents: write on tala-io/taladb-kotlin. Skipped, not failed, while the
-  # secret is unset, so a release never blocks on it.
+  # Contents: write on tala-io/taladb-kotlin and tala-io/taladb-swift. Skipped,
+  # not failed, while the secret is unset, so a release never blocks on it.
   notify-native-packages:
     name: Notify native packages
     runs-on: ubuntu-latest
@@ -759,3 +803,19 @@ jobs:
             -f "client_payload[version]=$VERSION" \
             -f "client_payload[url]=$BASE/$ASSET" \
             -f "client_payload[sha256]=$SHA256"
+
+      - name: Dispatch taladb-release to tala-io/taladb-swift
+        if: env.DISPATCH_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ secrets.NATIVE_PACKAGES_DISPATCH_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          ASSET="TalaDBFFI-$VERSION.xcframework.zip"
+          BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
+          CHECKSUM="$(curl -fsSL "$BASE/$ASSET.checksum" | tr -d '[:space:]')"
+          gh api repos/tala-io/taladb-swift/dispatches \
+            -f event_type=taladb-release \
+            -f "client_payload[version]=$VERSION" \
+            -f "client_payload[url]=$BASE/$ASSET" \
+            -f "client_payload[checksum]=$CHECKSUM"
