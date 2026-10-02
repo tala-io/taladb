@@ -214,7 +214,17 @@ impl Database {
         };
         let raw: Arc<dyn StorageBackend> = Arc::new(RedbBackend::open(path)?);
         let key = crypto::derive_key(passphrase, &salt, crypto::MIN_PBKDF2_ITERATIONS)?;
-        Self::open_with_backend(Box::new(crypto::EncryptedBackend::new(raw, key)))
+        // The first read decrypts the schema metadata, so a wrong passphrase
+        // fails here as an AEAD tag mismatch — reported by the cipher as just
+        // "aead::Error". Say what it means; the code stays "Encryption".
+        Self::open_with_backend(Box::new(crypto::EncryptedBackend::new(raw, key))).map_err(|e| {
+            match e {
+                TalaDbError::Encryption(detail) => TalaDbError::Encryption(format!(
+                    "wrong passphrase, or the file was not encrypted with it ({detail})"
+                )),
+                other => other,
+            }
+        })
     }
     /// Build a `Database` around an already-constructed backend, running the
     /// built-in migration chain first.
