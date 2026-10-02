@@ -147,6 +147,7 @@ export default defineConfig({
           { text: "iOS & macOS (Swift) · early", link: "/guide/swift" },
           { text: "Rust · early", link: "/guide/rust" },
           { text: "CLI Dev Tools", link: "/guide/cli" },
+          { text: "Vector Benchmarks", link: "/guide/vector-benchmarks" },
         ],
       },
       {

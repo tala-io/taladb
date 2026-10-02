@@ -6,6 +6,10 @@ on:
     paths:
       - 'packages/core/**'
       - 'scripts/vector-bench-ci.py'
+      - 'scripts/bench-web/**'
+      - 'scripts/bench-web.mjs'
+      - 'scripts/vector-web-bench-compare.mjs'
+      - 'packages/bindings/web/**'
       - '.github/workflows/performance.yml'
       - 'Cargo.*'
       - 'rust-toolchain.toml'
@@ -118,4 +122,79 @@ jobs:
             vector-benchmark.json
             vector-benchmark-staged.json
             vector-benchmark-filtered.json
+          retention-days: 90
+
+  browser:
+    name: Browser worker + OPFS
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Sync pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: vector-web
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+      - name: Prepare baseline
+        env:
+          BENCH_BASE: ${{ github.event.pull_request.base.sha || github.event.before || 'HEAD^' }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            BENCH_BASE=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo HEAD^)
+          fi
+          if ! git cat-file -e "$BENCH_BASE^{commit}" 2>/dev/null; then
+            BENCH_BASE=HEAD^
+          fi
+          git worktree add --detach "$RUNNER_TEMP/vector-web-baseline" "$BENCH_BASE"
+      - name: Build both browser bindings
+        run: |
+          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target/vector-web-baseline" \
+            wasm-pack build "$RUNNER_TEMP/vector-web-baseline/packages/bindings/web" --target web --out-dir pkg --release
+          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target/vector-web-candidate" \
+            wasm-pack build packages/bindings/web --target web --out-dir pkg --release
+      - name: Check browser harness
+        run: node scripts/bench-web/vector-workload.test.mjs
+      - name: Compare small-device cache profiles
+        env:
+          BENCH_EVENT: ${{ github.event_name }}
+        run: |
+          count=2000
+          repeats=3
+          if [ "$BENCH_EVENT" != pull_request ]; then count=5000; repeats=1; fi
+          failed=0
+          budgets="8388608"
+          if grep -q 'pub vector_cache_bytes:' "$RUNNER_TEMP/vector-web-baseline/packages/core/src/config.rs"; then
+            budgets="1048576 8388608"
+          else
+            echo "Baseline predates configurable cache budgets; comparing its 8 MiB WASM default." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          for budget in $budgets; do
+            before=""
+            after=""
+            for run in $(seq 1 "$repeats"); do
+              node scripts/bench-web.mjs --vectors --repo "$RUNNER_TEMP/vector-web-baseline" \
+                --count "$count" --queries 30 --cache-bytes "$budget" --json --output "vector-web-before-$budget-$run.json"
+              node scripts/bench-web.mjs --vectors --count "$count" --queries 30 \
+                --cache-bytes "$budget" --json --output "vector-web-after-$budget-$run.json"
+              before="${before:+$before,}vector-web-before-$budget-$run.json"
+              after="${after:+$after,}vector-web-after-$budget-$run.json"
+            done
+            node scripts/vector-web-bench-compare.mjs "$before" "$after" \
+              "vector-web-comparison-$budget.json" || failed=1
+          done
+          exit "$failed"
+      - name: Publish browser benchmark history
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vector-web-${{ github.sha }}-${{ github.run_attempt }}
+          path: vector-web-*.json
           retention-days: 90

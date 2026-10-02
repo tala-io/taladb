@@ -48,8 +48,6 @@ JavaScript runtime.
 - **Cost-aware filter planning** — use selectivity estimates and metadata about
   array-valued fields to choose cheaper index intersections and narrower scalar
   range scans while preserving array matching semantics.
-- **Lower graph traversal cost** — leaner cached nodes and reusable traversal
-  buffers, so larger graphs stay resident in memory.
 - **Bounded search working memory** — account for active cache loans and
   concurrent query scratch space alongside the retained cache budget.
 - **Adaptive cache sizing** — adapt the shared, configurable vector/graph
@@ -58,9 +56,11 @@ JavaScript runtime.
   portable vectorisation already in place.
 - **Index tuning guidance by device class** — recommended parameters from
   low-memory phones through desktops.
-- **Broader benchmark coverage** — extend the native CI comparisons to browser
-  workers and physical mobile devices, with representative embedding datasets,
-  peak-memory measurements and published trends across releases.
+- **Broader benchmark coverage** — automate physical Android/iOS device runs,
+  cover more browser engines and representative embedding datasets, and publish
+  peak-memory measurements and trends across releases. Native and Chromium
+  worker/OPFS comparisons already run in CI; manual phone-browser runs use the
+  [vector benchmark workload](/guide/vector-benchmarks).
 
 ---
 
