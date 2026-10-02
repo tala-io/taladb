@@ -92,8 +92,78 @@ let matches = docs.search_text("title", "groceries", 5)?;
 
 Exact vector search is faster and always exact below tens of thousands of
 vectors; pass `HnswOptions` for a persistent approximate graph beyond that.
-Hybrid search, aggregation, sorting, pagination and HNSW tuning are on the
-untyped collection — `docs.raw()` — documented on [docs.rs](https://docs.rs/taladb).
+`find_nearest` takes an optional filter — `Some(json!({ "kind": "note" }))` —
+that narrows the candidates before ranking.
+
+### Hybrid search
+
+Hybrid search fuses BM25 text relevance with vector similarity, for queries
+where exact terms and meaning both matter — retrieval for on-device RAG, for
+example. It lives on the underlying collection, reached with `.raw()`:
+
+```rust
+use taladb::fts::HybridQuery;
+use taladb::json::{document_to_json, filter_from_json};
+
+let hits = docs.raw().hybrid_search(
+    HybridQuery::new("title", "groceries", "embedding", &query_embedding, 5)
+        .filter(filter_from_json(&json!({ "done": false }))?),
+)?;
+for hit in &hits {
+    let doc: Doc = serde_json::from_value(document_to_json(&hit.document))?;
+    // hit.score is the fused rank score; hit.text_rank / hit.vector_rank are
+    // zero-based positions in each ranking, or None if absent from one.
+}
+```
+
+## Sorting and pagination
+
+`find` returns every match. To sort, page or project, use the underlying
+collection's `find_with_options`, and decode the results into your type:
+
+```rust
+use taladb::json::{document_to_json, filter_from_json};
+use taladb::{FindOptions, SortSpec};
+
+let page = notes.raw().find_with_options(
+    filter_from_json(&json!({ "done": false }))?,
+    FindOptions {
+        sort: vec![SortSpec::desc("stars")],
+        skip: 0,
+        limit: Some(20),
+        ..Default::default()
+    },
+)?;
+let page: Vec<Note> = page
+    .iter()
+    .map(|doc| serde_json::from_value(document_to_json(doc)))
+    .collect::<Result<_, _>>()?;
+```
+
+`FindOptions` also takes `fields` (return only these fields, plus `_id`) and
+`timeout` (fail a query that runs too long).
+
+## Aggregation
+
+Pipelines are JSON too — `$match`, `$group`, `$sort`, `$skip`, `$limit`,
+`$project` ([reference](/api/aggregation)):
+
+```rust
+use taladb::json::{document_to_json, filter_from_json};
+
+let pipeline = taladb::aggregate::parse_pipeline(
+    &json!([
+        { "$group": { "_id": "$done", "total": { "$sum": "$stars" } } },
+        { "$sort": { "_id": 1 } },
+    ]),
+    &|f| filter_from_json(f).map_err(|e| e.to_string()),
+)
+.map_err(taladb::TalaDbError::InvalidOperation)?;
+
+for row in notes.raw().aggregate(pipeline)? {
+    println!("{}", document_to_json(&row));   // {"_id":false,"total":4}
+}
+```
 
 ## Live queries
 
@@ -126,7 +196,94 @@ Enable the `encryption` feature: `cargo add taladb --features encryption`. See
 
 Storage-format upgrades run automatically at open. For your own schema steps,
 `db.user_version()` and `db.set_user_version(n)` record which have run — the
-same counter the other platforms' [migration runners](/api/migrations) use.
+same counter the other platforms' [migration runners](/api/migrations) use:
+
+```rust
+let db = taladb::open("app.db")?;
+if db.user_version()? < 1 {
+    db.typed::<Note>("notes")?.create_index("done")?;
+    db.set_user_version(1)?;
+}
+if db.user_version()? < 2 {
+    db.typed::<Note>("notes")?.update_many(
+        json!({ "stars": { "$exists": false } }),
+        json!({ "$set": { "stars": 0 } }),
+    )?;
+    db.set_user_version(2)?;
+}
+```
+
+Bump the version after each step succeeds, so a step that fails runs again on
+the next start — and write each step so running it twice is harmless.
+
+## The untyped API
+
+Under every typed collection is a `Collection` of dynamically typed documents:
+fields are `(String, Value)` pairs and filters are the `Filter` enum. Reach it
+with `db.collection(name)` or `typed.raw()` — both see the same documents.
+
+```rust
+use taladb::{Filter, Value};
+
+let events = db.collection("events")?;
+events.insert(vec![
+    ("kind".into(), Value::Str("login".into())),
+    ("ms".into(), Value::Int(42)),
+])?;
+let slow = events.find(Filter::Gt("ms".into(), Value::Int(10)))?;
+let ms = slow[0].get("ms");   // Some(&Value::Int(42))
+```
+
+`taladb::json` converts between the two: `filter_from_json`,
+`update_from_json`, `fields_from_json` and `document_to_json`.
+
+## Errors
+
+Every operation returns `Result<_, TalaDbError>`. Match the variants you can
+handle:
+
+```rust
+use taladb::TalaDbError;
+
+match notes.find(json!({ "stars": { "$gtt": 1 } })) {
+    Err(TalaDbError::InvalidFilter(filter)) => eprintln!("bad filter: {filter}"),
+    Err(e) => return Err(e.into()),
+    Ok(found) => { /* … */ }
+}
+```
+
+Common ones: `InvalidFilter` (malformed filter), `InvalidOperation` (malformed
+update or pipeline), `IndexNotFound`, `DuplicateId`, `VectorDimensionMismatch`,
+`Serialization` (a document did not match your type), and `Encryption` (wrong
+passphrase).
+
+## API at a glance
+
+**`TypedCollection<T>`** — from `db.typed::<T>(name)`:
+
+| Method | Returns |
+|---|---|
+| `insert(&T)` / `insert_many(&[T])` | the new id(s) — `insert_many` is all or nothing |
+| `find(filter)` / `find_one(filter)` / `find_by_id(id)` | `Vec<T>` / `Option<T>` |
+| `count(filter)` | `u64` |
+| `update_one(filter, update)` / `update_many(filter, update)` | whether one matched / how many changed |
+| `delete_one(filter)` / `delete_many(filter)` | whether one matched / how many were deleted |
+| `create_index` · `create_compound_index` · `create_fts_index` · `create_vector_index` | `()` — all idempotent |
+| `find_nearest(field, &[f32], top_k, filter)` | `Vec<Scored<T>>`, best first |
+| `search_text(field, query, top_k)` | `Vec<Scored<T>>`, best first |
+| `watch(filter)` | `TypedWatch<T>` — `next()`, `next_timeout(d)`, `try_next()` |
+| `raw()` | the underlying `Collection` |
+
+**`Collection`** adds `find_with_options`, `aggregate`, `hybrid_search`,
+`search_text_with` (BM25 tuning), `drop_*` for every index kind,
+`list_indexes`, and HNSW maintenance.
+
+**`Database`** — `taladb::open(path)`, `open_in_memory()`,
+`open_encrypted(path, passphrase)`, `typed::<T>(name)`, `collection(name)`,
+`list_collection_names()`, `flush()`, `compact()`, `export_snapshot()` /
+`restore_from_snapshot()`, `user_version()` / `set_user_version()`.
+
+Full signatures and every type are on [docs.rs/taladb](https://docs.rs/taladb).
 
 ## Features
 
