@@ -1,10 +1,10 @@
 //! `$project` inclusion/exclusion semantics, and the bounded (top-K) `$sort`.
 use serde_json::json;
-use taladb_core::Database;
-use taladb_core::aggregate::{Stage, parse_pipeline};
-use taladb_core::document::{Document, Value};
-use taladb_core::query::Filter;
-use taladb_core::query::options::{SortDirection, SortSpec};
+use taladb::Database;
+use taladb::aggregate::{Stage, parse_pipeline};
+use taladb::document::{Document, Value};
+use taladb::query::Filter;
+use taladb::query::options::{SortDirection, SortSpec};
 
 fn parse(src: serde_json::Value) -> Result<Vec<Stage>, String> {
     parse_pipeline(&src, &|_| Ok(Filter::All))
@@ -296,7 +296,7 @@ fn limit_larger_than_collection_is_safe() {
 fn sort_after_group_is_not_bounded_away() {
     // A $group between the scan and the sort changes the document set; the
     // bound must be computed over the *grouped* rows, not the raw ones.
-    use taladb_core::aggregate::{Accumulator, GroupKey};
+    use taladb::aggregate::{Accumulator, GroupKey};
     let db = db_with(100);
     let col = db.collection("items").unwrap();
     let out = col

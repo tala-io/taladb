@@ -1,11 +1,11 @@
 //! The index-served sort fast path must be *indistinguishable* from the
 //! scan-and-sort path it replaces. Every test here pins the fast path's output
 //! against the same query run without a bound (which always takes the slow path).
-use taladb_core::Database;
-use taladb_core::aggregate::Stage;
-use taladb_core::document::{Document, Value};
-use taladb_core::query::Filter;
-use taladb_core::query::options::{SortDirection, SortSpec};
+use taladb::Database;
+use taladb::aggregate::Stage;
+use taladb::document::{Document, Value};
+use taladb::query::Filter;
+use taladb::query::options::{SortDirection, SortSpec};
 
 fn spec(field: &str, dir: SortDirection) -> SortSpec {
     SortSpec {

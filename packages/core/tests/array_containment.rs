@@ -13,8 +13,8 @@
 //! b-tree stores one entry per element (`encode_index_keys`), and if it did not,
 //! adding an index would silently shrink the result set.
 
-use taladb_core::document::Value;
-use taladb_core::{Database, Filter};
+use taladb::document::Value;
+use taladb::{Database, Filter};
 
 fn arr(items: &[&str]) -> Value {
     Value::Array(items.iter().map(|s| Value::Str((*s).into())).collect())
@@ -25,7 +25,7 @@ fn nums(items: &[i64]) -> Value {
 }
 
 /// Seed a collection, optionally indexing `tags` and `scores`.
-fn seeded(indexed: bool) -> taladb_core::Collection {
+fn seeded(indexed: bool) -> taladb::Collection {
     let db = Box::leak(Box::new(Database::open_in_memory().unwrap()));
     let col = db.collection("posts").unwrap();
     if indexed {
@@ -55,7 +55,7 @@ fn seeded(indexed: bool) -> taladb_core::Collection {
     col
 }
 
-fn titles(docs: &[taladb_core::Document]) -> Vec<String> {
+fn titles(docs: &[taladb::Document]) -> Vec<String> {
     let mut out: Vec<String> = docs
         .iter()
         .map(|d| match d.get("title") {
@@ -69,7 +69,7 @@ fn titles(docs: &[taladb_core::Document]) -> Vec<String> {
 
 /// Run `f` against both an unindexed and an indexed collection, requiring the
 /// same answer from each.
-fn both(f: impl Fn(&taladb_core::Collection) -> Vec<String>, expected: &[&str]) {
+fn both(f: impl Fn(&taladb::Collection) -> Vec<String>, expected: &[&str]) {
     let want: Vec<String> = expected.iter().map(|s| (*s).to_string()).collect();
     assert_eq!(f(&seeded(false)), want, "unindexed");
     assert_eq!(f(&seeded(true)), want, "indexed");
@@ -196,7 +196,7 @@ fn updates_keep_the_index_in_step_with_the_document() {
     let col = seeded(true);
     col.update_one(
         Filter::Eq("title".into(), Value::Str("b".into())),
-        taladb_core::Update::Set(vec![("tags".into(), arr(&["swift"]))]),
+        taladb::Update::Set(vec![("tags".into(), arr(&["swift"]))]),
     )
     .unwrap();
 
@@ -319,7 +319,7 @@ fn a_compound_index_refuses_two_array_members() {
         ])
         .unwrap_err();
     assert!(
-        matches!(err, taladb_core::TalaDbError::CompoundIndexMultipleArrays),
+        matches!(err, taladb::TalaDbError::CompoundIndexMultipleArrays),
         "the key count would be the product of the two lists, got {err:?}"
     );
 }

@@ -12,9 +12,9 @@
 //! short prefix can easily out-score a full-length vector, putting a corrupt
 //! entry at the top of the results.
 
-use taladb_core::Database;
-use taladb_core::document::Value;
-use taladb_core::vector::{VectorMetric, encode_f32_vec, vec_table_name};
+use taladb::Database;
+use taladb::document::Value;
+use taladb::vector::{VectorMetric, encode_f32_vec, vec_table_name};
 
 fn vec_field(v: &[f32]) -> Value {
     Value::Array(v.iter().map(|f| Value::Float(f64::from(*f))).collect())

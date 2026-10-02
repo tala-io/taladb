@@ -3,10 +3,8 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc,
 };
-use taladb_core::engine::{ReadTxn, WriteTxn};
-use taladb_core::{
-    Database, Document, Filter, RedbBackend, StorageBackend, TalaDbError, Update, Value,
-};
+use taladb::engine::{ReadTxn, WriteTxn};
+use taladb::{Database, Document, Filter, RedbBackend, StorageBackend, TalaDbError, Update, Value};
 
 struct Gate {
     armed: AtomicBool,
@@ -198,7 +196,7 @@ fn stale_hnsw_falls_back_to_current_exact_results() {
     let db = Database::open_in_memory().unwrap();
     let col = db.collection("docs").unwrap();
     col.insert(vec![("v".into(), vector(0.0, 1.0))]).unwrap();
-    col.create_vector_index("v", 2, None, Some(taladb_core::HnswOptions::default()))
+    col.create_vector_index("v", 2, None, Some(taladb::HnswOptions::default()))
         .unwrap();
     let id = col.insert(vec![("v".into(), vector(1.0, 0.0))]).unwrap();
     assert_eq!(
@@ -237,7 +235,7 @@ fn invalid_vector_components_roll_back_the_document_write() {
 
 #[test]
 fn invalid_hnsw_connectivity_is_rejected() {
-    use taladb_core::vector::HnswOptions;
+    use taladb::vector::HnswOptions;
     let db = Database::open_in_memory().unwrap();
     let col = db.collection("docs").unwrap();
     assert!(

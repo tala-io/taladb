@@ -1766,21 +1766,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "taladb-cli"
-version = "0.11.9"
-dependencies = [
- "anyhow",
- "clap",
- "reqwest",
- "serde_json",
- "taladb-core",
- "tempfile",
- "tiny_http",
- "ulid",
-]
-
-[[package]]
-name = "taladb-core"
+name = "taladb"
 version = "0.11.9"
 dependencies = [
  "aes-gcm",
@@ -1805,11 +1791,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "taladb-cli"
+version = "0.11.9"
+dependencies = [
+ "anyhow",
+ "clap",
+ "reqwest",
+ "serde_json",
+ "taladb",
+ "tempfile",
+ "tiny_http",
+ "ulid",
+]
+
+[[package]]
 name = "taladb-ffi"
 version = "0.11.9"
 dependencies = [
  "serde_json",
- "taladb-core",
+ "taladb",
  "tempfile",
 ]
 
@@ -1821,7 +1821,7 @@ dependencies = [
  "napi-build",
  "napi-derive",
  "serde_json",
- "taladb-core",
+ "taladb",
  "tokio",
 ]
 
@@ -1837,7 +1837,7 @@ dependencies = [
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
- "taladb-core",
+ "taladb",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-bindgen-test",

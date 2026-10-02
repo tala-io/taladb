@@ -18,7 +18,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 postcard = { version = "1.0", features = ["alloc"] }
 serde_json = "1.0"
-taladb-core = { path = "..", features = ["encryption"] }
+taladb-core = { package = "taladb", path = "..", features = ["encryption"] }
 # The JSON→Filter/Update parsers live in the bindings, not the core. This is the
 # one binding reachable from a fuzzer without a napi or wasm toolchain; the
 # `fuzzing` feature exposes its parsers and is off in shipping builds.

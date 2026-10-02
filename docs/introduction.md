@@ -25,7 +25,7 @@ The same Rust core powers every runtime:
 
 All three surfaces expose a single unified TypeScript API from the `taladb` package, so application code never needs to branch on platform.
 
-Native apps can use the same engine without React Native through first-party packages over the C FFI — [Android (Kotlin)](/guide/android) and [iOS & macOS (Swift)](/guide/swift). Both are **early releases**.
+Native apps can use the same engine without React Native through first-party packages over the C FFI — [Android (Kotlin)](/guide/android) and [iOS & macOS (Swift)](/guide/swift). Rust applications use the engine directly as the [`taladb` crate](/guide/rust). All three are **early releases**.
 
 ## Architecture overview
 
@@ -38,7 +38,7 @@ TalaDB is built in three layers:
 └──────────────────────────────┬───────────────────────────────┘
                                │  postcard bytes
 ┌──────────────────────────────▼───────────────────────────────┐
-│  Layer 2 — Document + Vector Engine  (taladb-core)            │
+│  Layer 2 — Document + Vector Engine  (crate: taladb)          │
 │  Document model · B-tree indexes · Vector indexes             │
 │  Query planner/executor · FTS · Migrations · Live queries     │
 └──────────────────────────────┬───────────────────────────────┘
@@ -51,9 +51,9 @@ TalaDB is built in three layers:
 
 **Layer 1 — Storage.** [redb](https://github.com/cberner/redb) is a pure-Rust, B-tree embedded key-value store. In the browser, TalaDB runs redb over a custom OPFS backend using `FileSystemSyncAccessHandle` in one storage-owning DedicatedWorker, giving durable on-device persistence without IndexedDB's overhead.
 
-**Layer 2 — Document + vector engine.** `taladb-core` sits above the storage layer and knows nothing about JavaScript bindings. It provides the document model, secondary index key encoding, vector index storage and similarity search, the filter/update AST, the query planner, full-text search, and schema migrations. Documents and vector entries live in separate redb tables (`docs::`, `idx::`, `vec::`) but are updated atomically in the same transaction.
+**Layer 2 — Document + vector engine.** The `taladb` crate sits above the storage layer and knows nothing about JavaScript bindings. It provides the document model, secondary index key encoding, vector index storage and similarity search, the filter/update AST, the query planner, full-text search, and schema migrations. Documents and vector entries live in separate redb tables (`docs::`, `idx::`, `vec::`) but are updated atomically in the same transaction.
 
-**Layer 3 — Bindings.** Thin platform-specific wrappers translate JavaScript values into the Rust types that `taladb-core` expects and route them through the storage layer.
+**Layer 3 — Bindings.** Thin platform-specific wrappers translate JavaScript values into the Rust types that the engine expects and route them through the storage layer.
 
 ## Repository structure
 
@@ -65,7 +65,7 @@ taladb/
 ├── pnpm-workspace.yaml
 │
 ├── packages/
-│   ├── core/                       # THE engine — pure Rust, no JS bindings (crate: taladb-core)
+│   ├── core/                       # THE engine — pure Rust, no JS bindings (crate: taladb)
 │   │   └── src/                    #   document/engine/index/collection/vector/query/…
 │   │
 │   ├── bindings/                   # Thin runtime WRAPPERS over core

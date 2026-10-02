@@ -4,9 +4,9 @@
 //! The tables are seeded by raw key writes rather than through the old APIs,
 //! which no longer exist — what matters to the migration is the table name.
 
-use taladb_core::document::{Document, Value};
-use taladb_core::engine::{RedbBackend, StorageBackend};
-use taladb_core::{Database, Filter};
+use taladb::document::{Document, Value};
+use taladb::engine::{RedbBackend, StorageBackend};
+use taladb::{Database, Filter};
 
 /// Seed the tables a pre-0.11 database would carry, and stamp it as v1 so only
 /// the new migration is pending.
@@ -49,7 +49,7 @@ fn open_drops_tombstone_and_quarantine_tables() {
     let backend = RedbBackend::open_in_memory().unwrap();
     seed_pre_0_11(&backend);
 
-    taladb_core::migration::run_migrations(&backend, taladb_core::BUILTIN_MIGRATIONS).unwrap();
+    taladb::migration::run_migrations(&backend, taladb::BUILTIN_MIGRATIONS).unwrap();
 
     let names = table_names(&backend);
     assert!(
@@ -67,8 +67,8 @@ fn open_drops_tombstone_and_quarantine_tables() {
 
     let rtxn = backend.begin_read().unwrap();
     assert_eq!(
-        taladb_core::migration::read_version(rtxn.as_ref()).unwrap(),
-        taladb_core::CURRENT_SCHEMA_VERSION,
+        taladb::migration::read_version(rtxn.as_ref()).unwrap(),
+        taladb::CURRENT_SCHEMA_VERSION,
     );
 }
 
@@ -76,13 +76,13 @@ fn open_drops_tombstone_and_quarantine_tables() {
 fn migration_is_idempotent_and_safe_on_a_fresh_database() {
     let backend = RedbBackend::open_in_memory().unwrap();
     // No replication tables to find, and running twice must not error.
-    taladb_core::migration::run_migrations(&backend, taladb_core::BUILTIN_MIGRATIONS).unwrap();
-    taladb_core::migration::run_migrations(&backend, taladb_core::BUILTIN_MIGRATIONS).unwrap();
+    taladb::migration::run_migrations(&backend, taladb::BUILTIN_MIGRATIONS).unwrap();
+    taladb::migration::run_migrations(&backend, taladb::BUILTIN_MIGRATIONS).unwrap();
 
     let rtxn = backend.begin_read().unwrap();
     assert_eq!(
-        taladb_core::migration::read_version(rtxn.as_ref()).unwrap(),
-        taladb_core::CURRENT_SCHEMA_VERSION,
+        taladb::migration::read_version(rtxn.as_ref()).unwrap(),
+        taladb::CURRENT_SCHEMA_VERSION,
     );
 }
 

@@ -13,7 +13,7 @@
 //! source, so callers can walk the chain (or downcast) to make that decision:
 //!
 //! ```no_run
-//! # use taladb_core::TalaDbError;
+//! # use taladb::TalaDbError;
 //! # fn handle(err: TalaDbError) {
 //! use std::error::Error;
 //!

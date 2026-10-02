@@ -1,33 +1,41 @@
-//! **TalaDB core** — an embedded, local-first document database with built-in
-//! vector search, designed to run on the device rather than behind a network
-//! hop.
-//!
-//! This crate is the engine. Applications normally reach it through a language
-//! binding — `taladb` / `@taladb/web` / `@taladb/react` on npm — but it is
-//! usable directly from Rust, which is what the examples below do.
+//! **TalaDB** — an embedded, local-first document database with built-in
+//! vector search, for Rust apps. It runs inside your process and stores
+//! everything in one file; the same engine powers TalaDB in the browser,
+//! Node.js, React Native, Android and iOS.
 //!
 //! # Getting started
 //!
-//! ```no_run
-//! use taladb_core::{Database, Filter, Value};
+//! ```
+//! use serde::{Deserialize, Serialize};
+//! use serde_json::json;
 //!
-//! # fn main() -> Result<(), taladb_core::TalaDbError> {
-//! let db = Database::open_in_memory()?;
-//! let books = db.collection("books")?;
+//! #[derive(Serialize, Deserialize)]
+//! struct Book {
+//!     title: String,
+//!     year: i64,
+//! }
 //!
-//! books.insert(vec![
-//!     ("title".into(), Value::Str("Noli Me Tángere".into())),
-//!     ("year".into(), Value::Int(1887)),
-//! ])?;
+//! # fn main() -> Result<(), taladb::TalaDbError> {
+//! let db = taladb::Database::open_in_memory()?; // or taladb::open("app.db")
+//! let books = db.typed::<Book>("books")?;
 //!
-//! let found = books.find(Filter::Gte("year".into(), Value::Int(1800)))?;
+//! books.insert(&Book { title: "Noli Me Tángere".into(), year: 1887 })?;
+//! let found = books.find(json!({ "year": { "$gte": 1800 } }))?;
 //! assert_eq!(found.len(), 1);
 //! # Ok(())
 //! # }
 //! ```
 //!
+//! [`Database::typed`] gives a [`TypedCollection`] of your own serde types,
+//! queried with the [JSON filter language](json) every TalaDB platform shares.
+//! The untyped [`Collection`] underneath works with [`Value`]s and typed
+//! [`Filter`]s directly.
+//!
 //! # What's in here
 //!
+//! - [`TypedCollection`] — serde-typed documents, JSON filters and updates, and
+//!   typed live queries ([`TypedWatch`]).
+//! - [`json`] — the JSON query language: documents, filters and updates.
 //! - [`Database`] — open a database ([`Database::open`], [`Database::open_in_memory`],
 //!   or [`Database::open_with_backend`] for a custom storage backend such as
 //!   OPFS in the browser) and hand out [`Collection`]s.
@@ -49,10 +57,10 @@
 //!
 //! # Runtime targets
 //!
-//! The browser (via `wasm32-unknown-unknown`) and React Native are the primary
-//! targets; native and Node are supported but are not what the design optimises
-//! for. Anything that would bloat a WASM bundle is feature-gated — see the
-//! `config-yaml`, `encryption`, and `vector-hnsw` features.
+//! Native Rust, the browser (via `wasm32-unknown-unknown`), Node.js, React
+//! Native, Android and iOS all run this crate. Anything that would bloat a
+//! WASM bundle is feature-gated — see the `config-yaml`, `encryption` and
+//! `legacy-migration` features.
 
 pub mod aggregate;
 pub mod audit;
@@ -65,11 +73,13 @@ pub mod engine;
 pub mod error;
 pub mod fts;
 pub mod index;
+pub mod json;
 pub mod json_depth;
 pub mod migrate;
 pub mod migration;
 pub mod query;
 pub mod time;
+pub mod typed;
 pub mod vector;
 pub mod watch;
 
@@ -98,10 +108,20 @@ pub use redb;
 #[cfg(feature = "legacy-migration")]
 pub use redb2;
 pub use time::now_ms;
+pub use typed::{Scored, TypedCollection, TypedWatch};
 /// Re-exported so bindings can parse and construct document ids without taking a
 /// direct `ulid` dependency (and risking a version skew against the engine's).
 pub use ulid::Ulid;
 pub use vector::{HnswOptions, VectorMetric, VectorSearchResult};
+
+/// Re-exported so filters built with `taladb::serde_json::json!` always match
+/// the `serde_json` version this crate's API takes.
+pub use serde_json;
+
+/// Open (or create) the database file at `path`. Shorthand for [`Database::open`].
+pub fn open(path: impl AsRef<std::path::Path>) -> Result<Database, TalaDbError> {
+    Database::open(path.as_ref())
+}
 
 use std::path::Path;
 use std::sync::Arc;
@@ -643,3 +663,9 @@ pub use collection::{
     VectorSearchMode,
 };
 pub use vector_graph::{GraphOptions, Quantization};
+
+// Compiles the README's examples as doctests, so the crates.io page cannot
+// drift from the API it describes.
+#[doc = include_str!("../README.md")]
+#[cfg(doctest)]
+pub struct ReadmeDoctests;

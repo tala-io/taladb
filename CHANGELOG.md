@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+TalaDB for Rust: the engine is now the `taladb` crate, published to crates.io and usable as the local database of any Rust application. It is the only crate published — the FFI, Node.js, web and CLI crates are marked `publish = false`.
+
+- **Renamed the engine crate `taladb-core` → `taladb`.** Inside this repository the bindings depend on it as `taladb-core = { package = "taladb", … }`, so their code is unchanged.
+- Added a serde-typed API: `taladb::open(path)`, `Database::typed::<T>(name)` returning a `TypedCollection<T>` with insert, find, update and delete over your own `Serialize + Deserialize` types; vector, full-text and live queries (`TypedWatch`) returning them too; and `.raw()` for the untyped collection.
+- Added `taladb::json`, the JSON query language — documents, filters and updates as `serde_json` values — moved out of the C FFI crate, which now delegates to it. Rust code queries with the same `{"age": {"$gte": 18}}` filters as every other platform, and malformed filters are errors, never a silent match-all.
+- The release workflow publishes the `taladb` crate when `CARGO_REGISTRY_TOKEN` is configured. Because Cargo treats `0.x.y` releases as compatible, breaking Rust API changes now bump the minor version.
+- Added a Rust guide to the docs, marked early release, and rewrote the crate README; its examples run as doctests.
+
 ## 0.11.9— 2026-10-02
 
 Groundwork for first-party Kotlin and Swift packages that wrap the C FFI directly, without React Native. Those packages live in their own repositories (`tala-io/taladb-kotlin`, `tala-io/taladb-swift`) and consume prebuilt libraries from the GitHub release, so the C interface now carries an explicit version.

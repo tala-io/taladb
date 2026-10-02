@@ -84,7 +84,7 @@ JavaScript (React Native)
 C++ HostObject (TalaDBHostObject.cpp)
         │  C FFI
         ▼
-Rust static library (taladb-core)
+Rust static library (taladb engine)
         │
         ▼
 redb B-tree (app documents directory)

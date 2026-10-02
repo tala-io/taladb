@@ -49,7 +49,7 @@ impl SortSpec {
 /// the plain `find` method.
 ///
 /// ```
-/// use taladb_core::query::options::{FindOptions, SortSpec};
+/// use taladb::query::options::{FindOptions, SortSpec};
 ///
 /// let opts = FindOptions {
 ///     sort: vec![SortSpec::desc("createdAt"), SortSpec::asc("name")],

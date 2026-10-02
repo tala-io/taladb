@@ -4,9 +4,9 @@
 //! term frequencies, document lengths, and corpus statistics stay correct
 //! across inserts, updates, and deletes — the accounting, not the formula.
 
-use taladb_core::Database;
-use taladb_core::document::{Document, Value};
-use taladb_core::error::TalaDbError;
+use taladb::Database;
+use taladb::document::{Document, Value};
+use taladb::error::TalaDbError;
 
 fn body(doc: &Document) -> &str {
     match doc.get("body") {
@@ -15,7 +15,7 @@ fn body(doc: &Document) -> &str {
     }
 }
 
-fn titles(results: &[taladb_core::fts::TextSearchResult]) -> Vec<String> {
+fn titles(results: &[taladb::fts::TextSearchResult]) -> Vec<String> {
     results
         .iter()
         .map(|r| match r.document.get("title") {
@@ -132,8 +132,8 @@ fn updates_replace_term_frequencies_rather_than_accumulating() {
     // Rewrite the body so the term now occurs once.
     let id = before[0].document.id;
     col.update_one(
-        taladb_core::query::Filter::Eq("_id".into(), Value::Str(id.to_string())),
-        taladb_core::collection::Update::Set(vec![(
+        taladb::query::Filter::Eq("_id".into(), Value::Str(id.to_string())),
+        taladb::collection::Update::Set(vec![(
             "body".into(),
             Value::Str("rust appears once now".into()),
         )]),
@@ -169,7 +169,7 @@ fn deletes_remove_documents_from_the_ranking() {
         .unwrap()
         .document
         .id;
-    col.delete_one(taladb_core::query::Filter::Eq(
+    col.delete_one(taladb::query::Filter::Eq(
         "_id".into(),
         Value::Str(doomed.to_string()),
     ))
@@ -233,7 +233,7 @@ fn contains_filter_still_requires_every_token() {
     let col = db.collection("articles").unwrap();
 
     let filtered = col
-        .find(taladb_core::query::Filter::Contains(
+        .find(taladb::query::Filter::Contains(
             "body".into(),
             "alpha beta".into(),
         ))

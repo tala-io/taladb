@@ -54,6 +54,8 @@ Application code uses the unified `taladb` package with a single TypeScript API 
 | Android (Kotlin) | [`taladb-kotlin`](https://github.com/tala-io/taladb-kotlin) · `dev.taladb:taladb-android` | JNI over the C FFI · [guide](https://taladb.dev/guide/android) |
 | iOS & macOS (Swift) | [`taladb-swift`](https://github.com/tala-io/taladb-swift) | SwiftPM over the C FFI · [guide](https://taladb.dev/guide/swift) |
 
+**Rust apps (early release).** The engine itself is the [`taladb`](https://crates.io/crates/taladb) crate: serde-typed documents, the same JSON filters as every platform, vector and full-text search, and live queries, embedded in any Rust application. See the [Rust guide](https://taladb.dev/guide/rust).
+
 ## Highlights
 
 - **Vector search** — exact k-NN by default (cosine, dot, euclidean) with no recall trade-off, plus optional HNSW when scale demands it; pairs directly with on-device embedding models (transformers.js, ONNX Runtime Web)

@@ -9,9 +9,7 @@
 //!     cargo run --release -p taladb-core --example hnsw_profile [count]
 
 use std::time::Instant;
-use taladb_core::{
-    Database, GraphOptions, Value, VectorMetric, VectorQueryOptions, VectorSearchMode,
-};
+use taladb::{Database, GraphOptions, Value, VectorMetric, VectorQueryOptions, VectorSearchMode};
 
 const DIMS: usize = 384;
 const CLUSTERS: usize = 512;
@@ -122,7 +120,7 @@ fn main() {
 
     // `Document` carries its ULID as a struct field, not as an `_id` entry in
     // `fields` — that mapping happens in the bindings.
-    let ids = |r: taladb_core::VectorQueryResult| -> Vec<String> {
+    let ids = |r: taladb::VectorQueryResult| -> Vec<String> {
         r.hits
             .into_iter()
             .map(|h| h.document.id.to_string())

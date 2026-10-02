@@ -16,9 +16,9 @@
 //! # Example
 //!
 //! ```ignore
-//! use taladb_core::aggregate::{Accumulator, GroupKey, Pipeline, Stage};
-//! use taladb_core::query::Filter;
-//! use taladb_core::query::options::SortSpec;
+//! use taladb::aggregate::{Accumulator, GroupKey, Pipeline, Stage};
+//! use taladb::query::Filter;
+//! use taladb::query::options::SortSpec;
 //!
 //! let result = col.aggregate(vec![
 //!     Stage::Match(Filter::Eq("status".into(), Value::Str("active".into()))),

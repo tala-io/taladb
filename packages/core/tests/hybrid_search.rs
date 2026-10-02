@@ -5,11 +5,11 @@
 //! up documents where exactly one retriever can find the answer, and check
 //! that fusion recovers it.
 
-use taladb_core::Database;
-use taladb_core::bm25::RrfParams;
-use taladb_core::document::{Document, Value};
-use taladb_core::fts::HybridQuery;
-use taladb_core::query::Filter;
+use taladb::Database;
+use taladb::bm25::RrfParams;
+use taladb::document::{Document, Value};
+use taladb::fts::HybridQuery;
+use taladb::query::Filter;
 
 /// Deliberately crude 4-dimensional "embeddings" so similarity is obvious
 /// by inspection rather than hidden behind a model.
@@ -23,7 +23,7 @@ fn title(doc: &Document) -> String {
     }
 }
 
-fn titles(results: &[taladb_core::fts::HybridSearchResult]) -> Vec<String> {
+fn titles(results: &[taladb::fts::HybridSearchResult]) -> Vec<String> {
     results.iter().map(|r| title(&r.document)).collect()
 }
 

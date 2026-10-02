@@ -5,14 +5,14 @@
 //! index DDL, cross-collection isolation, and multi-handle sharing — because a
 //! missed invalidation would silently return outdated rankings.
 
-use taladb_core::Database;
-use taladb_core::document::{Document, Value};
+use taladb::Database;
+use taladb::document::{Document, Value};
 
 fn vec_val(v: &[f32]) -> Value {
     Value::Array(v.iter().map(|f| Value::Float(f64::from(*f))).collect())
 }
 
-fn insert_vec(col: &taladb_core::Collection, title: &str, v: &[f32]) -> taladb_core::Ulid {
+fn insert_vec(col: &taladb::Collection, title: &str, v: &[f32]) -> taladb::Ulid {
     col.insert(vec![
         ("title".into(), Value::Str(title.into())),
         ("embedding".into(), vec_val(v)),
@@ -20,7 +20,7 @@ fn insert_vec(col: &taladb_core::Collection, title: &str, v: &[f32]) -> taladb_c
     .unwrap()
 }
 
-fn titles(results: &[taladb_core::VectorSearchResult]) -> Vec<String> {
+fn titles(results: &[taladb::VectorSearchResult]) -> Vec<String> {
     results
         .iter()
         .map(|r| match r.document.get("title") {
@@ -83,8 +83,8 @@ fn updating_an_embedding_is_visible() {
 
     // Rewrite the embedding to point straight at the query.
     col.update_one(
-        taladb_core::query::Filter::Eq("_id".into(), Value::Str(id.to_string())),
-        taladb_core::collection::Update::Set(vec![("embedding".into(), vec_val(&[1.0, 0.0]))]),
+        taladb::query::Filter::Eq("_id".into(), Value::Str(id.to_string())),
+        taladb::collection::Update::Set(vec![("embedding".into(), vec_val(&[1.0, 0.0]))]),
     )
     .unwrap();
 
@@ -106,7 +106,7 @@ fn delete_after_a_cached_query_is_visible() {
     let q = [1.0, 0.0];
     assert_eq!(col.find_nearest("embedding", &q, 5, None).unwrap().len(), 2);
 
-    col.delete_one(taladb_core::query::Filter::Eq(
+    col.delete_one(taladb::query::Filter::Eq(
         "_id".into(),
         Value::Str(_drop.to_string()),
     ))
@@ -133,8 +133,8 @@ fn dropping_and_recreating_the_index_does_not_serve_stale_vectors() {
     // Drop the index (removes vectors), delete the doc, add a different one,
     // recreate the index. A stale cache entry would resurrect "old".
     col.drop_vector_index("embedding").unwrap();
-    for d in col.find(taladb_core::query::Filter::All).unwrap() {
-        col.delete_one(taladb_core::query::Filter::Eq(
+    for d in col.find(taladb::query::Filter::All).unwrap() {
+        col.delete_one(taladb::query::Filter::Eq(
             "_id".into(),
             Value::Str(d.id.to_string()),
         ))
@@ -175,7 +175,7 @@ fn filtered_search_is_correct_with_the_cache() {
             "embedding",
             &q,
             5,
-            Some(taladb_core::query::Filter::Eq(
+            Some(taladb::query::Filter::Eq(
                 "locale".into(),
                 Value::Str("en".into()),
             )),
@@ -234,7 +234,7 @@ fn a_write_through_one_handle_invalidates_reads_through_another() {
     assert_eq!(titles(&after)[0], "closer");
 }
 
-fn col_titles(col: &taladb_core::Collection, q: &[f32]) -> Vec<String> {
+fn col_titles(col: &taladb::Collection, q: &[f32]) -> Vec<String> {
     titles(&col.find_nearest("embedding", q, 5, None).unwrap())
 }
 

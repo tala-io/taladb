@@ -1,4 +1,4 @@
-use taladb_core::{Database, Filter, Update, Value};
+use taladb::{Database, Filter, Update, Value};
 
 fn v(s: &str) -> Value {
     Value::Str(s.to_string())

@@ -4,13 +4,13 @@
 
 use ulid::Ulid;
 
-use taladb_core::document::Document;
-use taladb_core::engine::{RedbBackend, StorageBackend};
-use taladb_core::index::{
+use taladb::document::Document;
+use taladb::engine::{RedbBackend, StorageBackend};
+use taladb::index::{
     IndexDef, META_INDEXES_TABLE, META_VERSION_KEY, META_VERSION_TABLE, docs_table_name,
     index_table_name, meta_key,
 };
-use taladb_core::{Database, Filter, Value};
+use taladb::{Database, Filter, Value};
 
 /// The exact old-format string index key: `[0x40] ++ utf8_bytes ++ ulid_16_bytes`.
 /// No null-escape, no terminator.  This is what earlier builds of TalaDB wrote
@@ -76,10 +76,7 @@ fn open_rewrites_pre_terminator_string_index() {
     // Sanity: version is still 0 pre-open (no db_version table written yet).
     {
         let rtxn = backend.begin_read().unwrap();
-        assert_eq!(
-            taladb_core::migration::read_version(rtxn.as_ref()).unwrap(),
-            0
-        );
+        assert_eq!(taladb::migration::read_version(rtxn.as_ref()).unwrap(), 0);
     }
 
     // 2. Hand the backend to Database::open_with_backend — migration must run.
@@ -89,8 +86,8 @@ fn open_rewrites_pre_terminator_string_index() {
     {
         let rtxn = db.backend().begin_read().unwrap();
         assert_eq!(
-            taladb_core::migration::read_version(rtxn.as_ref()).unwrap(),
-            taladb_core::CURRENT_SCHEMA_VERSION
+            taladb::migration::read_version(rtxn.as_ref()).unwrap(),
+            taladb::CURRENT_SCHEMA_VERSION
         );
     }
 
@@ -114,13 +111,13 @@ fn open_is_idempotent_when_already_current() {
     // the migration twice via `run_migrations` directly.
     let backend = RedbBackend::open_in_memory().unwrap();
 
-    taladb_core::migration::run_migrations(&backend, taladb_core::BUILTIN_MIGRATIONS).unwrap();
-    taladb_core::migration::run_migrations(&backend, taladb_core::BUILTIN_MIGRATIONS).unwrap();
+    taladb::migration::run_migrations(&backend, taladb::BUILTIN_MIGRATIONS).unwrap();
+    taladb::migration::run_migrations(&backend, taladb::BUILTIN_MIGRATIONS).unwrap();
 
     let rtxn = backend.begin_read().unwrap();
     assert_eq!(
-        taladb_core::migration::read_version(rtxn.as_ref()).unwrap(),
-        taladb_core::CURRENT_SCHEMA_VERSION
+        taladb::migration::read_version(rtxn.as_ref()).unwrap(),
+        taladb::CURRENT_SCHEMA_VERSION
     );
 }
 
