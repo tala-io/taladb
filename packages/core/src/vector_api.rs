@@ -301,21 +301,45 @@ impl Collection {
         let rev = revision(&WriteView(txn), &table)?;
         self.drop_graph_in(txn, &def.field)?;
         let mut h = Header::new(
-            format!("hnsw::{key}::a"),
+            format!("hnsw::{key}::{}", Ulid::new()),
             rev,
             options,
             def.dimensions,
             def.metric,
         );
-        for (id, bytes) in txn.range(
-            &table,
-            std::ops::Bound::Unbounded,
-            std::ops::Bound::Unbounded,
-        )? {
-            let id = <[u8; 16]>::try_from(id.as_slice())
-                .map_err(|_| invalid("invalid stored vector ID"))?;
-            let v = decode_f32_vec(&bytes).ok_or_else(|| invalid("invalid stored vector bytes"))?;
-            graph::insert(txn, &mut h, id, &v)?;
+        // Read bounded batches before borrowing the write transaction for graph
+        // edits. A whole-index `range` otherwise duplicates every stored vector.
+        let budget = self
+            .node_cache()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .budget();
+        let mut cache = graph::NodeCache::with_budget(budget);
+        let mut last: Option<Vec<u8>> = None;
+        loop {
+            let mut batch = Vec::with_capacity(128);
+            let start = last
+                .as_deref()
+                .map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded);
+            WriteView(txn).scan(&table, start, std::ops::Bound::Unbounded, &mut |k, v| {
+                batch.push((k.to_vec(), v.to_vec()));
+                Ok(if batch.len() == 128 {
+                    ScanFlow::Stop
+                } else {
+                    ScanFlow::Continue
+                })
+            })?;
+            if batch.is_empty() {
+                break;
+            }
+            for (id, bytes) in batch {
+                let doc = <[u8; 16]>::try_from(id.as_slice())
+                    .map_err(|_| invalid("invalid stored vector ID"))?;
+                let v =
+                    decode_f32_vec(&bytes).ok_or_else(|| invalid("invalid stored vector bytes"))?;
+                graph::insert_cached(txn, &mut h, doc, &v, &mut cache)?;
+                last = Some(id);
+            }
         }
         self.publish_graph_in(txn, &key, &h)
     }
@@ -391,18 +415,8 @@ impl Collection {
         };
         self.build_graph_in(txn.as_mut(), &def, options)?;
         txn.commit()?;
-        // A rebuild rewrites links (and renumbers nodes when it compacts
-        // tombstones) while leaving the vector revision untouched, so the
-        // revision tag alone would let a cache outlive the graph it describes.
-        //
-        // This is a recall guard, not a correctness one, and the difference is
-        // worth stating: the ANN loop above rescores every returned id against
-        // the vector table in the current snapshot, so a stale graph can only
-        // change *which* candidates are considered, never their scores and never
-        // whether a deleted document can surface. Attempts to produce a wrong
-        // answer from a stale cache here did not manage it — HNSW still lands on
-        // good neighbours through slightly wrong links. Evicting is cheap and
-        // keeps recall tied to the graph that is actually on disk.
+        // Every replacement has a unique table identity, even when vectors do
+        // not change. Evict retained predecessors and invalidate active loans.
         self.evict_node_cache(field);
         Ok(())
     }
@@ -480,15 +494,9 @@ impl Collection {
         let vtable = vec_table_name(&self.name, field);
         let rev = revision(&view, &vtable)?;
         let id = Ulid::new().to_string();
-        let active = graph::header(&view, &key)?;
-        let slot = if active.is_some_and(|h| h.table.ends_with("::a")) {
-            "b"
-        } else {
-            "a"
-        };
         let build = Build {
             progress: VectorBuildProgress {
-                id,
+                id: id.clone(),
                 state: "building".into(),
                 processed: 0,
                 total: view.count_entries(&vtable)?,
@@ -496,7 +504,7 @@ impl Collection {
                 error: None,
             },
             header: Header::new(
-                format!("hnsw::{key}::{slot}"),
+                format!("hnsw::{key}::{id}"),
                 rev,
                 options,
                 def.dimensions,
@@ -563,15 +571,22 @@ impl Collection {
                 Some("vectors changed during the build; restart the build".into());
             txn.delete_table(&build.header.table)?;
         } else {
+            let budget = self
+                .node_cache()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .budget();
+            let mut cache = graph::NodeCache::with_budget(budget);
             for (key, bytes) in batch {
                 let vector =
                     decode_f32_vec(&bytes).ok_or_else(|| invalid("invalid stored vector"))?;
-                graph::insert(
+                graph::insert_cached(
                     txn.as_mut(),
                     &mut build.header,
                     <[u8; 16]>::try_from(key.as_slice())
                         .map_err(|_| invalid("invalid stored vector ID"))?,
                     &vector,
+                    &mut cache,
                 )?;
                 build.last = Some(key);
                 build.progress.processed += 1;
@@ -590,6 +605,9 @@ impl Collection {
             &postcard::to_allocvec(&build)?,
         )?;
         txn.commit()?;
+        if build.progress.state == "ready" {
+            self.evict_node_cache(field);
+        }
         Ok(build.progress)
     }
     pub fn cancel_vector_build(
@@ -707,6 +725,14 @@ impl Collection {
         } else {
             None
         };
+        if allowed.as_ref().is_some_and(HashSet::is_empty) {
+            return Ok(VectorQueryResult {
+                hits: vec![],
+                execution,
+                next_offset: None,
+            });
+        }
+        let eligible = allowed.as_ref().map_or(count, |ids| ids.len().min(count));
         let mut rows;
         if ann {
             let h = h.as_ref().unwrap();
@@ -724,10 +750,8 @@ impl Collection {
             // queries both decoding and the last one winning, which is a cache
             // miss, not a wrong answer.
             //
-            // `h.revision` is the vector-table revision this graph was built
-            // against, and the `ready` check above already refused to run ANN
-            // unless it matches the table's current revision — so a cache tagged
-            // with the same revision cannot hold nodes from a different graph.
+            // The unique table identity pins the loan to this graph generation;
+            // revision additionally pins it to the vectors in this snapshot.
             let mut lease = graph::CacheLease::take(self.node_cache(), &h.table, h.revision);
             loop {
                 let (ids, distances) =
@@ -755,9 +779,16 @@ impl Collection {
                     }
                 }
                 ranked.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
-                rows = self.load_results_in(txn, ranked)?;
+                if let Some(threshold) = options.score_threshold {
+                    ranked.retain(|r| r.1 >= threshold);
+                }
+                let limit = options
+                    .group_by
+                    .is_none()
+                    .then_some(wanted.saturating_add(1));
+                rows = self.load_results_limited_in(txn, ranked, limit)?;
                 Self::reduce_vector_rows(&mut rows, options)?;
-                if rows.len() >= wanted || ef >= count {
+                if rows.len() >= wanted.min(eligible) || ef >= count {
                     break;
                 }
                 ef = ef.saturating_mul(2).min(count);

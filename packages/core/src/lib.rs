@@ -160,10 +160,8 @@ pub struct Database {
     /// other handle of the same collection.
     watch_registries:
         Arc<std::sync::Mutex<std::collections::HashMap<String, watch::SharedRegistry>>>,
-    /// Decoded-vector cache for flat search, shared by every Collection handle
-    /// from this Database (keyed by `collection::field`).
-    vector_cache: vector::SharedVectorCache,
-    node_cache: vector_graph::SharedNodeCache,
+    /// Shared retained-memory budget for exact vectors and graph nodes.
+    search_cache: search_cache::SharedSearchCache,
 }
 
 impl Database {
@@ -230,8 +228,7 @@ impl Database {
             backend,
             index_cache: collection::new_shared_index_cache(),
             watch_registries: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-            vector_cache: vector::new_shared_vector_cache(),
-            node_cache: vector_graph::new_shared_node_cache(),
+            search_cache: search_cache::new_shared_search_cache(),
         })
     }
 
@@ -262,6 +259,23 @@ impl Database {
         let db = Self::from_backend(Arc::new(RedbBackend::open(path)?))?;
         run_migrations(db.backend.as_ref(), migrations)?;
         Ok(db)
+    }
+
+    /// Set the shared byte budget for retained exact-vector and graph caches.
+    /// Zero disables retention. Active queries and builds may use scratch space
+    /// beyond this budget; this is not a limit on process or storage-engine RAM.
+    pub fn set_vector_cache_budget(&self, bytes: usize) {
+        self.search_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .set_budget(bytes);
+    }
+
+    pub fn vector_cache_stats(&self) -> VectorCacheStats {
+        self.search_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .stats()
     }
 
     /// Access the raw storage backend.
@@ -308,8 +322,7 @@ impl Database {
         let col = Collection::new(name, Arc::clone(&self.backend))
             .with_index_cache(Arc::clone(&self.index_cache))
             .with_watch_registry(registry)
-            .with_vector_cache(Arc::clone(&self.vector_cache))
-            .with_node_cache(Arc::clone(&self.node_cache));
+            .with_search_cache(Arc::clone(&self.search_cache));
         Ok(col)
     }
 
@@ -657,11 +670,13 @@ mod snapshot_encoding_tests {
     }
 }
 
+mod search_cache;
 mod vector_graph;
 pub use collection::{
     VectorBuildProgress, VectorExecution, VectorIndexStatus, VectorQueryOptions, VectorQueryResult,
     VectorSearchMode,
 };
+pub use search_cache::VectorCacheStats;
 pub use vector_graph::{GraphOptions, Quantization};
 
 // Compiles the README's examples as doctests, so the crates.io page cannot

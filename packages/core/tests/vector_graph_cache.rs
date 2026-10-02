@@ -5,19 +5,10 @@
 //! that rewrites a graph: data writes (which move the vector revision), index
 //! create and drop, and rebuild.
 //!
-//! What the cache can and cannot break is worth being precise about, because it
-//! sets how much these tests can prove. The ANN path rescores every id the graph
-//! returns against the vector table in the current snapshot, so the graph only
-//! decides *which* candidates are considered — scores are always current and a
-//! deleted document cannot surface through a stale node. A stale cache is
-//! therefore a recall risk, not a correctness one, and attempts to make a stale
-//! cache return a wrong answer did not succeed: HNSW still reaches good
-//! neighbours through slightly wrong links.
-//!
-//! So these assertions pin the reachable contract — agreement with exact search,
-//! no resurrected documents, no cross-collection bleed — rather than proving the
-//! eviction in `rebuild_vector_index` is load-bearing. That eviction is
-//! deliberate defence; removing it does not fail these tests.
+//! ANN rescores candidates from the original vectors, so stale nodes affect
+//! candidate selection rather than returned scores. Larger quantization-change
+//! and staged-rebuild regressions live in `vector_performance.rs`; lease tests
+//! also verify that invalidation cannot be undone by an in-flight query.
 
 use taladb::{Database, HnswOptions, Value, VectorMetric, VectorQueryOptions, VectorSearchMode};
 

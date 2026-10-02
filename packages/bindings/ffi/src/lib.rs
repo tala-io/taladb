@@ -292,6 +292,7 @@ pub unsafe extern "C" fn taladb_open_with_config(
 
         let mut passphrase: Option<String> = None;
         let mut durability_eventual = false;
+        let mut vector_cache_bytes = None;
         if !config_json.is_null() {
             let json_str = match unsafe { CStr::from_ptr(config_json) }.to_str() {
                 Ok(s) => s,
@@ -320,6 +321,7 @@ pub unsafe extern "C" fn taladb_open_with_config(
             match serde_json::from_value::<TalaDbConfig>(value) {
                 Ok(config) => {
                     durability_eventual = !config.durability.flush_every_write;
+                    vector_cache_bytes = config.vector_cache_bytes;
                 }
                 Err(e) => {
                     set_last_error(format!("invalid config JSON: {e}"));
@@ -335,6 +337,9 @@ pub unsafe extern "C" fn taladb_open_with_config(
         match opened {
             Ok(db) => {
                 db.set_durability(durability_eventual);
+                if let Some(bytes) = vector_cache_bytes {
+                    db.set_vector_cache_budget(bytes);
+                }
                 Box::into_raw(Box::new(TalaDbHandle { db }))
             }
             Err(e) => {
@@ -2814,6 +2819,17 @@ mod tests {
         .unwrap();
         let handle = unsafe { taladb_open_with_config(path.as_ptr(), config.as_ptr()) };
         assert!(!handle.is_null());
+        unsafe { taladb_close(handle) };
+    }
+
+    #[test]
+    fn open_with_config_applies_the_vector_cache_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = CString::new(dir.path().join("budget.db").to_str().unwrap()).unwrap();
+        let config = CString::new(r#"{"vector_cache_bytes":0}"#).unwrap();
+        let handle = unsafe { taladb_open_with_config(path.as_ptr(), config.as_ptr()) };
+        assert!(!handle.is_null());
+        assert_eq!(unsafe { &*handle }.db.vector_cache_stats().budget_bytes, 0);
         unsafe { taladb_close(handle) };
     }
 

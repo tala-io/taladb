@@ -31,6 +31,8 @@ export interface DurabilityConfig {
 
 /** Top-level TalaDB configuration. */
 export interface TalaDbConfig {
+  /** Shared retained vector/graph cache budget in bytes; zero disables caching. */
+  vector_cache_bytes?: number;
   /** Outbound change-webhook configuration. Disabled by default. */
   webhook?: WebhookConfig;
   /** Storage durability configuration. */
@@ -50,6 +52,9 @@ export interface TalaDbConfig {
  */
 export function validateConfig(config: TalaDbConfig): void {
   if (config.webhook) validateWebhookConfig(config.webhook);
+  if (config.vector_cache_bytes !== undefined && (!Number.isSafeInteger(config.vector_cache_bytes) || config.vector_cache_bytes < 0)) {
+    throw new Error("TalaDB config: vector_cache_bytes must be a nonnegative safe integer");
+  }
 }
 
 // ---------------------------------------------------------------------------

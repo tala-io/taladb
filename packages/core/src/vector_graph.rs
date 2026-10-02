@@ -4,7 +4,7 @@
 //! Deleted nodes remain traversable; rebuilding compacts tombstones.
 use std::borrow::Cow;
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
@@ -286,6 +286,8 @@ struct Cached {
     /// Squared L2 norm of the decoded vector. Constant per node, needed by every
     /// cosine comparison against it.
     norm_sq: f32,
+    referenced: bool,
+    bytes: usize,
 }
 
 /// Decoded nodes, owned by the caller rather than by a `Reader`.
@@ -296,131 +298,154 @@ struct Cached {
 /// an insert was read from storage and postcard-decoded **twice**: measured at
 /// 1,140 storage fetches per inserted vector against a graph holding only 2,000
 /// nodes. Hoisting it here makes the second pass free.
-#[derive(Default)]
 pub(crate) struct NodeCache {
     nodes: HashMap<u64, Cached, IdHash>,
+    clock: VecDeque<u64>,
     bytes: usize,
+    budget: usize,
 }
-
-#[cfg(test)]
+impl Default for NodeCache {
+    fn default() -> Self {
+        Self::with_budget(crate::search_cache::DEFAULT_SEARCH_CACHE_BYTES)
+    }
+}
 impl NodeCache {
-    /// Test-only: lets the lease tests tell a reused cache from a fresh one.
+    pub(crate) fn with_budget(budget: usize) -> Self {
+        Self {
+            nodes: HashMap::default(),
+            clock: VecDeque::new(),
+            bytes: 0,
+            budget,
+        }
+    }
+    pub(crate) fn bytes(&self) -> usize {
+        self.bytes
+    }
+    #[cfg(test)]
     fn is_empty(&self) -> bool {
         self.nodes.is_empty()
     }
+    fn remove(&mut self, id: u64) {
+        if let Some(old) = self.nodes.remove(&id) {
+            self.bytes = self.bytes.saturating_sub(old.bytes);
+            self.clock.retain(|&queued| queued != id);
+        }
+    }
+    fn insert_node(&mut self, id: u64, node: Node, dimensions: usize) {
+        // Include decoded vector/link capacities and a conservative allowance
+        // for hash buckets, clock IDs, and the inline record. Serialized u64
+        // links are varints and substantially undercount decoded memory.
+        let vector_bytes = match &node.code {
+            Code::Float(v) => v.capacity() * 4,
+            Code::Scalar { values, .. } | Code::Binary(values) => values.capacity(),
+        };
+        let bytes = vector_bytes
+            + node.links.capacity() * std::mem::size_of::<Vec<u64>>()
+            + node.links.iter().map(|v| v.capacity() * 8).sum::<usize>()
+            + 2 * std::mem::size_of::<(u64, Cached)>()
+            + 16;
+        // Replacing an edited node should preserve its position in the clock.
+        let replacing = self.nodes.remove(&id);
+        if let Some(old) = &replacing {
+            self.bytes = self.bytes.saturating_sub(old.bytes);
+        }
+        let mut queued = replacing.is_some();
+        while self.bytes.saturating_add(bytes) > self.budget && !self.nodes.is_empty() {
+            let Some(victim) = self.clock.pop_front() else {
+                break;
+            };
+            if victim == id {
+                queued = false;
+            }
+            let Some(entry) = self.nodes.get_mut(&victim) else {
+                continue;
+            };
+            if entry.referenced {
+                entry.referenced = false;
+                self.clock.push_back(victim);
+            } else if let Some(old) = self.nodes.remove(&victim) {
+                self.bytes = self.bytes.saturating_sub(old.bytes);
+            }
+        }
+        let norm = replacing
+            .as_ref()
+            .map_or_else(|| norm_sq(&node.code.decode(dimensions)), |old| old.norm_sq);
+        self.nodes.insert(
+            id,
+            Cached {
+                node,
+                norm_sq: norm,
+                referenced: true,
+                bytes,
+            },
+        );
+        if !queued {
+            self.clock.push_back(id);
+        }
+        self.bytes = self.bytes.saturating_add(bytes);
+    }
 }
 
-/// Retained decoded nodes for one graph, tagged with the vector revision they
-/// were read at.
-///
-/// A `NodeCache` used to be built and thrown away per query, so every query
-/// re-read and re-decoded every node it touched — measured at ~97% of ANN query
-/// time, with scoring itself under 3%. Retaining it across queries is worth
-/// roughly 4x at `efSearch` 100 (8.3 ms to 1.8 ms over 10,000 vectors) and does
-/// not change which documents come back: `revision` pins the cache to the
-/// vector-table revision the graph was built against, and `search` already
-/// refuses to run against a graph whose revision does not match the table's.
-/// Index create/drop rewrite the graph without bumping that revision, so they
-/// evict explicitly — see `Collection::evict_node_cache`.
 pub(crate) struct CachedGraph {
     pub revision: u64,
     pub cache: NodeCache,
 }
 
-/// A borrowed graph cache that always finds its way home.
-///
-/// `search_vectors` takes the cache out of the shared map rather than holding
-/// the lock across a query, so concurrent queries on one graph do not
-/// serialise. The cost of that choice is that the put-back has to happen on
-/// every exit path, and an ANN query has several: the graph read, the snapshot
-/// read of each vector, loading the documents and reducing them can all fail,
-/// and each `?` used to leave the map without an entry. The next query then
-/// paid a full decode — a cache that silently emptied itself whenever anything
-/// went wrong.
-///
-/// Returning it in `Drop` covers the error paths and a panic alike.
+/// A loan pins decoded nodes to the snapshot's unique graph table and vector
+/// revision. DDL changes the table identity; invalidation prevents an older
+/// query from returning its loan after the retained cache has been cleared.
 pub(crate) struct CacheLease<'a> {
-    shared: &'a SharedNodeCache,
+    shared: &'a crate::search_cache::SharedSearchCache,
     table: String,
     revision: u64,
+    epoch: u64,
     cache: Option<NodeCache>,
 }
-
 impl<'a> CacheLease<'a> {
-    /// Take the cache for `table`, or start an empty one when nothing is
-    /// cached or what is cached was built against a different revision.
-    pub(crate) fn take(shared: &'a SharedNodeCache, table: &str, revision: u64) -> Self {
-        let cache = {
-            let mut map = shared
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            match map.remove(table) {
-                Some(entry) if entry.revision == revision => entry.cache,
-                _ => NodeCache::default(),
-            }
+    pub(crate) fn take(
+        shared: &'a crate::search_cache::SharedSearchCache,
+        table: &str,
+        revision: u64,
+    ) -> Self {
+        let mut map = shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut cache = match map.take_graph(table) {
+            Some(entry) if entry.revision == revision => entry.cache,
+            _ => NodeCache::with_budget(map.budget()),
         };
+        cache.budget = map.budget();
         Self {
             shared,
             table: table.to_string(),
             revision,
+            epoch: map.epoch,
             cache: Some(cache),
         }
     }
-
     pub(crate) fn cache_mut(&mut self) -> &mut NodeCache {
         self.cache
             .as_mut()
             .expect("the cache is only taken in Drop")
     }
 }
-
 impl Drop for CacheLease<'_> {
     fn drop(&mut self) {
-        let Some(cache) = self.cache.take() else {
-            return;
-        };
-        let mut map = self
-            .shared
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // An eviction may have happened while this query ran — a rebuild
-        // through another handle, say. Putting the old nodes back would undo
-        // it, so only return them if nothing newer has claimed the slot.
-        match map.get(&self.table) {
-            Some(existing) if existing.revision != self.revision => {}
-            _ => {
-                map.insert(
-                    self.table.clone(),
+        if let Some(cache) = self.cache.take() {
+            self.shared
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert_graph(
+                    &self.table,
                     CachedGraph {
                         revision: self.revision,
                         cache,
                     },
+                    self.epoch,
                 );
-            }
         }
     }
 }
-
-/// Shared across every `Collection` handle from the same `Database`, keyed by
-/// graph table name, so a rebuild through one handle is seen by the others.
-pub type SharedNodeCache = std::sync::Arc<std::sync::Mutex<HashMap<String, CachedGraph>>>;
-
-pub fn new_shared_node_cache() -> SharedNodeCache {
-    std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()))
-}
-
-/// Budget for retained decoded graph nodes, per graph.
-///
-/// The previous 8 MiB was sized for a cache that lived for one query. Retained
-/// across queries it is the working set that matters: 10,000 nodes of 384
-/// dimensions is ~18 MiB, so 8 MiB made the cache fill, flush and refill — worth
-/// only 1.1x where a budget that fits the graph is worth 4.5x. WASM and mobile
-/// keep the smaller bound; a phone would rather re-read nodes than hold tens of
-/// megabytes it cannot spare.
-#[cfg(target_arch = "wasm32")]
-pub(crate) const NODE_CACHE_BYTES: usize = 8 * 1024 * 1024;
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) const NODE_CACHE_BYTES: usize = 64 * 1024 * 1024;
 
 struct Reader<'a> {
     txn: &'a dyn ReadTxn,
@@ -454,23 +479,11 @@ impl<'a> Reader<'a> {
             {
                 return Err(invalid("invalid HNSW node; rebuild the vector index"));
             }
-            // Bound retained node records on phones and in WASM. The queue and
-            // visited IDs remain lightweight; evicted nodes can be read again.
-            if self.cache.bytes.saturating_add(bytes.len()) > NODE_CACHE_BYTES {
-                self.cache.nodes.clear();
-                self.cache.bytes = 0;
-            }
-            self.cache.bytes = self.cache.bytes.saturating_add(bytes.len());
-            let norm = norm_sq(&node.code.decode(self.h.dimensions));
-            self.cache.nodes.insert(
-                id,
-                Cached {
-                    node,
-                    norm_sq: norm,
-                },
-            );
+            self.cache.insert_node(id, node, self.h.dimensions);
         }
-        Ok(self.cache.nodes.get(&id).unwrap())
+        let cached = self.cache.nodes.get_mut(&id).unwrap();
+        cached.referenced = true;
+        Ok(cached)
     }
     fn node(&mut self, id: u64) -> Result<&Node, TalaDbError> {
         Ok(&self.cached(id)?.node)
@@ -652,10 +665,27 @@ pub(crate) fn insert(
     doc: [u8; 16],
     values: &[f32],
 ) -> Result<(), TalaDbError> {
+    insert_cached(txn, h, doc, values, &mut NodeCache::default())
+}
+pub(crate) fn insert_cached(
+    txn: &mut dyn WriteTxn,
+    h: &mut Header,
+    doc: [u8; 16],
+    values: &[f32],
+    cache: &mut NodeCache,
+) -> Result<(), TalaDbError> {
     if values.len() != h.dimensions || !values.iter().all(|x| x.is_finite()) {
         return Err(invalid("invalid HNSW vector"));
     }
-    remove(txn, h, &doc)?;
+    if let Some(mapping) = txn.get(&h.table, &map_key(&doc))? {
+        let previous = u64::from_le_bytes(
+            mapping
+                .try_into()
+                .map_err(|_| invalid("invalid HNSW mapping"))?,
+        );
+        cache.remove(previous);
+        remove(txn, h, &doc)?;
+    }
     let id = h.next;
     h.next = h
         .next
@@ -684,13 +714,12 @@ pub(crate) fn insert(
         // One cache for the whole insert: the descent below and the back-linking
         // pass further down both traverse the same neighbourhood, so the second
         // pass should not pay to read it from storage again.
-        let mut cache = NodeCache::default();
         // Scoped rather than `drop(reader)`: the reader now borrows `cache`
         // instead of owning it, so it has nothing to drop — the block is what
         // actually ends the borrow of `txn` before the writes below.
         {
             let view = WriteView(txn);
-            let mut reader = Reader::new(&view, h, &mut cache);
+            let mut reader = Reader::new(&view, h, cache);
             for layer in ((level + 1)..=h.level).rev() {
                 entry = reader.greedy(&query, entry, layer)?;
             }
@@ -746,7 +775,7 @@ pub(crate) fn insert(
         let mut updates: HashMap<u64, Node> = HashMap::new();
         {
             let view = WriteView(txn);
-            let mut reader = Reader::new(&view, h, &mut cache);
+            let mut reader = Reader::new(&view, h, cache);
             for (layer, neighbors) in node.links.iter().enumerate() {
                 for &neighbor in neighbors {
                     let mut n = match updates.get(&neighbor) {
@@ -771,10 +800,12 @@ pub(crate) fn insert(
         }
         for (neighbor, n) in updates {
             txn.put(&h.table, &node_key(neighbor), &postcard::to_allocvec(&n)?)?;
+            cache.insert_node(neighbor, n, h.dimensions);
         }
     } else {
         txn.put(&h.table, &node_key(id), &postcard::to_allocvec(&node)?)?;
     }
+    cache.insert_node(id, node, h.dimensions);
     if h.entry.is_none() || level > h.level {
         h.entry = Some(id);
         h.level = level;
@@ -829,86 +860,58 @@ pub(crate) fn search(
 }
 
 #[cfg(test)]
-mod cache_lease_tests {
+mod cache_tests {
     use super::*;
-
-    fn shared() -> SharedNodeCache {
-        new_shared_node_cache()
-    }
-
-    #[test]
-    fn a_lease_returns_the_cache_when_it_is_dropped() {
-        let map = shared();
-        {
-            let _lease = CacheLease::take(&map, "graph::docs::embedding", 7);
-            assert!(
-                map.lock().unwrap().is_empty(),
-                "the cache is out on loan for the duration of a query",
-            );
+    use crate::search_cache::new_shared_search_cache;
+    fn node() -> Node {
+        Node {
+            doc: [0; 16],
+            code: Code::Float(vec![1.0, 0.0]),
+            links: vec![vec![1, 2]],
+            deleted: false,
         }
-        let held = map.lock().unwrap();
-        assert!(
-            held.contains_key("graph::docs::embedding"),
-            "dropping must return it"
-        );
-        assert_eq!(held["graph::docs::embedding"].revision, 7);
     }
-
-    /// The case that motivated `CacheLease`.
-    ///
-    /// An ANN query has several fallible steps, and the put-back used to sit
-    /// after all of them, so any `?` left the shared map without an entry and
-    /// the next query re-decoded the whole graph. Unwinding has to return it
-    /// just as a normal exit does.
     #[test]
-    fn a_lease_returns_the_cache_when_the_query_unwinds() {
-        let map = shared();
-        let taken = std::panic::catch_unwind({
-            let map = map.clone();
+    fn invalidation_discards_a_loan_even_without_a_replacement_entry() {
+        let shared = new_shared_search_cache();
+        let mut lease = CacheLease::take(&shared, "hnsw::docs::v::old", 1);
+        lease.cache_mut().insert_node(0, node(), 2);
+        shared.lock().unwrap().evict_field("docs", "v");
+        drop(lease);
+        assert_eq!(shared.lock().unwrap().stats().graph_indexes, 0);
+    }
+    #[test]
+    fn failed_queries_return_their_cache_and_revisions_do_not_mix() {
+        let shared = new_shared_search_cache();
+        let result = std::panic::catch_unwind({
+            let shared = shared.clone();
             move || {
-                let _lease = CacheLease::take(&map, "graph::docs::embedding", 3);
-                panic!("the query failed partway through");
+                let mut lease = CacheLease::take(&shared, "hnsw::docs::v::a", 1);
+                lease.cache_mut().insert_node(0, node(), 2);
+                panic!("query failure");
             }
         });
-        assert!(taken.is_err(), "the panic should have propagated");
-        assert!(
-            map.lock().unwrap().contains_key("graph::docs::embedding"),
-            "a failed query must not empty the cache",
-        );
+        assert!(result.is_err());
+        assert_eq!(shared.lock().unwrap().stats().graph_indexes, 1);
+        let mut lease = CacheLease::take(&shared, "hnsw::docs::v::a", 2);
+        assert!(lease.cache_mut().is_empty());
     }
-
     #[test]
-    fn a_stale_revision_is_not_reused() {
-        let map = shared();
-        drop(CacheLease::take(&map, "graph::docs::embedding", 1));
-        // A rebuild moves the graph on; the old nodes must not come back.
-        let mut lease = CacheLease::take(&map, "graph::docs::embedding", 2);
-        assert!(
-            lease.cache_mut().is_empty(),
-            "a different revision starts empty"
-        );
-        drop(lease);
-        assert_eq!(map.lock().unwrap()["graph::docs::embedding"].revision, 2);
-    }
-
-    /// An eviction during a query must win over the nodes the query is holding.
-    #[test]
-    fn an_eviction_mid_query_is_not_undone_by_the_put_back() {
-        let map = shared();
-        let lease = CacheLease::take(&map, "graph::docs::embedding", 1);
-        // A rebuild through another handle evicts and repopulates at revision 2.
-        map.lock().unwrap().insert(
-            "graph::docs::embedding".to_string(),
-            CachedGraph {
-                revision: 2,
-                cache: NodeCache::default(),
-            },
-        );
-        drop(lease);
-        assert_eq!(
-            map.lock().unwrap()["graph::docs::embedding"].revision,
-            2,
-            "the older lease must not overwrite a newer graph",
-        );
+    fn clock_eviction_keeps_nodes_instead_of_flushing_the_cache() {
+        let mut cache = NodeCache::default();
+        cache.insert_node(0, node(), 2);
+        cache.budget = cache.bytes * 3;
+        for id in 1..100 {
+            cache.insert_node(id, node(), 2);
+        }
+        assert!(cache.nodes.len() >= 2);
+        assert!(cache.bytes <= cache.budget);
+        // Link edits replace records without losing their eviction-clock slot.
+        for id in 97..100 {
+            cache.insert_node(id, node(), 2);
+        }
+        cache.insert_node(100, node(), 2);
+        assert!(cache.bytes <= cache.budget);
+        assert_eq!(cache.clock.len(), cache.nodes.len());
     }
 }

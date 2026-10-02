@@ -6,7 +6,7 @@
 //! numbers, and exits — which is what an optimisation on this path needs to be
 //! judged against.
 //!
-//!     cargo run --release -p taladb-core --example hnsw_profile [count]
+//!     cargo run --release -p taladb --example hnsw_profile [count]
 
 use std::time::Instant;
 use taladb::{Database, GraphOptions, Value, VectorMetric, VectorQueryOptions, VectorSearchMode};
@@ -62,10 +62,23 @@ fn to_value(v: &[f32]) -> Value {
 }
 
 fn main() {
+    let args: Vec<_> = std::env::args().collect();
+    let option = |name: &str, default: u32| -> u32 {
+        args.iter().position(|a| a == name).map_or(default, |i| {
+            args.get(i + 1)
+                .expect("missing parameter value")
+                .parse()
+                .expect("invalid parameter value")
+        })
+    };
+    let m = option("--m", 16);
+    let ef_construction = option("--ef-construction", 200);
+    let json_output = std::env::args().any(|a| a == "--json");
     let count: usize = std::env::args()
         .nth(1)
         .and_then(|a| a.parse().ok())
         .unwrap_or(10_000);
+    assert!(count >= TOP_K, "count must be at least {TOP_K}");
     // Cluster spread. Large values wash the clusters out and the set approaches
     // uniform-on-sphere, which is the pathological case for any proximity graph
     // in high dimensions — worth being able to vary before blaming the index.
@@ -73,7 +86,9 @@ fn main() {
         .nth(2)
         .and_then(|a| a.parse().ok())
         .unwrap_or(0.6);
-    println!("count {count}, spread {spread}, dims {DIMS}, clusters {CLUSTERS}");
+    if !json_output {
+        println!("count {count}, spread {spread}, dims {DIMS}, clusters {CLUSTERS}");
+    }
 
     let mut rng = Rng(0x2545_F491_4F6C_DD1D);
     let centroids: Vec<Vec<f32>> = (0..CLUSTERS)
@@ -83,8 +98,14 @@ fn main() {
     let points: Vec<Vec<f32>> = (0..count)
         .map(|i| make_point(&mut rng, &centroids[i % CLUSTERS], spread))
         .collect();
+    let mut probe_rng = Rng(0x2AB7_7CA8_8102_4991);
+    let rng = if json_output {
+        &mut probe_rng
+    } else {
+        &mut rng
+    };
     let probes: Vec<Vec<f32>> = (0..QUERIES)
-        .map(|q| make_point(&mut rng, &centroids[(q * 7) % CLUSTERS], spread))
+        .map(|q| make_point(rng, &centroids[(q * 7) % CLUSTERS], spread))
         .collect();
 
     let db = Database::open_in_memory().unwrap();
@@ -98,7 +119,10 @@ fn main() {
             .collect(),
     )
     .unwrap();
-    println!("insert {count}      {:>8.2?}", t.elapsed());
+    let insert_ms = t.elapsed().as_secs_f64() * 1000.0;
+    if !json_output {
+        println!("insert {count}      {:>8.2?}", t.elapsed());
+    }
 
     let t = Instant::now();
     col.create_vector_index_with_options(
@@ -106,17 +130,19 @@ fn main() {
         DIMS,
         Some(VectorMetric::Cosine),
         Some(GraphOptions {
-            m: 16,
-            ef_construction: 200,
+            m,
+            ef_construction,
             ..Default::default()
         }),
     )
     .unwrap();
     let build = t.elapsed();
-    println!(
-        "hnsw build         {build:>8.2?}   ({:.2} ms/vector)",
-        build.as_secs_f64() * 1000.0 / count as f64
-    );
+    if !json_output {
+        println!(
+            "hnsw build         {build:>8.2?}   ({:.2} ms/vector)",
+            build.as_secs_f64() * 1000.0 / count as f64
+        );
+    }
 
     // `Document` carries its ULID as a struct field, not as an `_id` entry in
     // `fields` — that mapping happens in the bindings.
@@ -132,33 +158,46 @@ fn main() {
         mode: VectorSearchMode::Exact,
         ..Default::default()
     };
-    let t = Instant::now();
+    let mut exact_times = Vec::new();
     let truth: Vec<Vec<String>> = probes
         .iter()
         .map(|q| {
-            ids(col
+            let start = Instant::now();
+            let result = col
                 .search_vectors("embedding", q, TOP_K, None, &exact_opts)
-                .unwrap())
+                .unwrap();
+            exact_times.push(start.elapsed().as_secs_f64() * 1000.0);
+            ids(result)
         })
         .collect();
-    println!(
-        "\nexact              {:>8.3} ms/query",
-        t.elapsed().as_secs_f64() * 1000.0 / QUERIES as f64
-    );
-
+    let exact_ms = exact_times.iter().sum::<f64>() / QUERIES as f64;
+    if !json_output {
+        println!("\nexact              {exact_ms:>8.3} ms/query");
+    }
+    let mut measurements = Vec::new();
     for ef in [50usize, 100, 200, 400] {
         let opts = VectorQueryOptions {
             mode: VectorSearchMode::Ann,
             ef_search: Some(ef),
             ..Default::default()
         };
+        if json_output {
+            for q in &probes {
+                col.search_vectors("embedding", q, TOP_K, None, &opts)
+                    .unwrap();
+            }
+        }
         let t = Instant::now();
+        let mut query_times = Vec::new();
         let mut recall = 0.0;
         let mut distances = 0usize;
         for (i, q) in probes.iter().enumerate() {
+            let start = Instant::now();
             let result = col
                 .search_vectors("embedding", q, TOP_K, None, &opts)
                 .unwrap();
+            query_times.push(start.elapsed().as_secs_f64() * 1000.0);
+            assert_eq!(result.execution.path, "hnsw");
             distances += result.execution.distance_computations;
             let found = ids(result)
                 .iter()
@@ -166,11 +205,39 @@ fn main() {
                 .count();
             recall += found as f64 / TOP_K as f64;
         }
+        let elapsed_ms = t.elapsed().as_secs_f64() * 1000.0 / QUERIES as f64;
+        if !json_output {
+            println!(
+                "ann ef={ef:<4}        {:>8.3} ms/query   recall@{TOP_K} {:>5.1}%   {:>6} distances",
+                t.elapsed().as_secs_f64() * 1000.0 / QUERIES as f64,
+                recall / QUERIES as f64 * 100.0,
+                distances / QUERIES
+            );
+        }
+        query_times.sort_by(f64::total_cmp);
+        measurements.push(serde_json::json!({ "ef_search": ef, "mean_ms": elapsed_ms,
+            "p50_ms": query_times[QUERIES / 2], "p95_ms": query_times[QUERIES * 95 / 100],
+            "recall_at_10": recall / QUERIES as f64, "distances": distances / QUERIES }));
+    }
+    if json_output {
+        let peak_rss_bytes = std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|status| {
+                status
+                    .lines()
+                    .find_map(|line| {
+                        line.strip_prefix("VmHWM:")
+                            .and_then(|rest| rest.split_whitespace().next())
+                            .and_then(|n| n.parse::<u64>().ok())
+                    })
+                    .map(|kb| kb * 1024)
+            });
         println!(
-            "ann ef={ef:<4}        {:>8.3} ms/query   recall@{TOP_K} {:>5.1}%   {:>6} distances",
-            t.elapsed().as_secs_f64() * 1000.0 / QUERIES as f64,
-            recall / QUERIES as f64 * 100.0,
-            distances / QUERIES
+            "{}",
+            serde_json::json!({ "schema": 1, "count": count, "dimensions": DIMS,
+            "spread": spread, "m": m, "ef_construction": ef_construction, "queries": QUERIES,
+            "insert_ms": insert_ms, "build_ms": build.as_secs_f64() * 1000.0,
+            "exact_mean_ms": exact_ms, "ann": measurements, "peak_rss_bytes": peak_rss_bytes })
         );
     }
 }

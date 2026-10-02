@@ -70,6 +70,9 @@ pub struct TalaDbConfig {
     /// Storage durability configuration.
     #[serde(default)]
     pub durability: DurabilityConfig,
+    /// Shared retained exact-vector and HNSW cache budget. Zero disables caching.
+    #[serde(default)]
+    pub vector_cache_bytes: Option<usize>,
 }
 
 // ---------------------------------------------------------------------------

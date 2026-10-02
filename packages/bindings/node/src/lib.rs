@@ -338,6 +338,9 @@ impl TalaDBNode {
             && let Ok(cfg) = serde_json::from_str::<TalaDbConfig>(json)
         {
             db.set_durability(!cfg.durability.flush_every_write);
+            if let Some(bytes) = cfg.vector_cache_bytes {
+                db.set_vector_cache_budget(bytes);
+            }
         }
         Ok(Self { inner: Some(db) })
     }

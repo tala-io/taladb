@@ -42,23 +42,26 @@ request issue.
 The goal is to keep TalaDB among the fastest embedded databases on every
 JavaScript runtime.
 
-- **Faster vector index builds** — graph construction is the current limit on
-  large indexes, and the main thing standing between approximate search and
-  mobile devices.
-- **Better approximate-search recall at scale** — recall falls off faster as a
-  collection grows than it should.
-- **Lower graph traversal cost** — smarter cache eviction and leaner cached
-  nodes, so larger graphs stay resident in memory.
+- **Better approximate-search recall at scale** — improve candidate selection
+  and graph connectivity, validated against exact search on larger collections
+  and representative embedding datasets.
+- **Faster resumable index builds** — reuse decoded nodes between build steps
+  while keeping each step's memory use and duration suitable for mobile devices.
+- **Index-covered vector filters** — evaluate covered predicates from index
+  keys and choose between selective vector lookups and contiguous scans.
+- **Lower graph traversal cost** — leaner cached nodes and reusable traversal
+  buffers, so larger graphs stay resident in memory.
+- **Bounded search working memory** — account for active cache loans and
+  concurrent query scratch space alongside the retained cache budget.
+- **Adaptive cache sizing** — adapt the shared, configurable vector/graph
+  budget to platform memory-pressure signals.
 - **Wider native SIMD** — a runtime-detected AVX2/NEON kernel on top of the
   portable vectorisation already in place.
-- **Faster filtered vector search** — stop materialising whole documents just to
-  collect the ids a filter matched.
 - **Index tuning guidance by device class** — recommended parameters from
   low-memory phones through desktops.
-- **Adaptive cache sizing** — size the decoded-vector cache from the device's
-  memory budget instead of one fixed default.
-- **Continuous benchmarks** — run the suites in CI each release and publish the
-  trend, so regressions are caught before they ship.
+- **Broader benchmark coverage** — extend the native CI comparisons to browser
+  workers and physical mobile devices, with representative embedding datasets,
+  peak-memory measurements and published trends across releases.
 
 ---
 

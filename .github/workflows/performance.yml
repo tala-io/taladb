@@ -1,0 +1,76 @@
+name: Vector performance
+
+on:
+  pull_request:
+    branches: [main, dev]
+    paths:
+      - 'packages/core/**'
+      - 'scripts/vector-bench-ci.py'
+      - '.github/workflows/performance.yml'
+      - 'Cargo.*'
+      - 'rust-toolchain.toml'
+  push:
+    branches: [main]
+  release:
+    types: [published]
+  schedule:
+    - cron: '0 2 * * 1'
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vector-performance-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  compare:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Sync pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Prepare baseline
+        env:
+          BENCH_BASE: ${{ github.event.pull_request.base.sha || github.event.before || 'HEAD^' }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            BENCH_BASE=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo HEAD^)
+          fi
+          if ! git cat-file -e "$BENCH_BASE^{commit}" 2>/dev/null; then
+            BENCH_BASE=HEAD^
+          fi
+          git worktree add --detach "$RUNNER_TEMP/vector-baseline" "$BENCH_BASE"
+      - name: Compare release workloads
+        env:
+          BENCH_EVENT: ${{ github.event_name }}
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+        run: |
+          count=2000
+          repeats=3
+          if [ "$BENCH_EVENT" != pull_request ]; then
+            count=10000
+            repeats=1
+          fi
+          python scripts/vector-bench-ci.py "$RUNNER_TEMP/vector-baseline" "$GITHUB_WORKSPACE" \
+            --count "$count" --repeats "$repeats" --output vector-benchmark.json
+      - name: Publish benchmark history
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vector-benchmark-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: vector-benchmark.json
+          retention-days: 90

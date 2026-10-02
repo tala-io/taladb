@@ -42,9 +42,10 @@ pub(crate) fn matching_ids(
 ) -> Result<HashSet<[u8; 16]>, TalaDbError> {
     let matcher = Matcher::new(filter)?;
     let mut ids = HashSet::new();
+    let fields = super::filter_document::fields(filter);
     let table = docs_table_name(collection);
     let mut accept = |bytes: &[u8]| -> Result<(), TalaDbError> {
-        let doc: Document = postcard::from_bytes(bytes)?;
+        let doc = super::filter_document::decode(bytes, &fields)?;
         if matcher.matches(&doc)? {
             ids.insert(doc.id.to_bytes());
         }

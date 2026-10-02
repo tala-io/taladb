@@ -171,6 +171,31 @@ const report = await articles.measureVectorRecall('embedding', sampleQueries, 10
 
 Measurement compares ANN with exact top-k using the same database snapshot. Use representative query vectors; this is an explicit evaluation operation, not automatic telemetry. Graph construction and selective filtered ANN can be expensive on a phone, so measure with your target devices and workload.
 
+## Search memory budget
+
+Exact vectors and decoded graph nodes share one retained cache budget per
+database: 8 MiB on Android, iOS and WASM; 64 MiB on other native targets.
+Configure a budget for your application's available memory when opening Node
+or browser databases:
+
+```ts
+const db = await openDB('articles', {
+  config: { vector_cache_bytes: 16 * 1024 * 1024 },
+})
+```
+
+React Native accepts the same field in its initialization config JSON. C FFI
+callers can pass it to `taladb_open_with_config`. Rust applications can call
+`db.set_vector_cache_budget(bytes)` and inspect `db.vector_cache_stats()`.
+Zero disables retention. Existing collection handles observe budget changes.
+
+This budget covers estimated retained vector and graph allocations across all
+indexed fields. Active queries, concurrent cache loans, rebuild scratch space,
+and storage-engine caches use additional memory. It is not a process RAM limit.
+Cache eviction affects performance, not query results. Device memory is not
+automatically detected; provide an application budget when the default is too
+large or too small.
+
 ## Pairing with on-device embedding models
 
 TalaDB is the storage-and-search half of an on-device AI stack. Any model that

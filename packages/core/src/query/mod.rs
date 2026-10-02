@@ -6,3 +6,5 @@ pub mod planner;
 pub use filter::Filter;
 pub use options::{FindOptions, SortDirection, SortSpec};
 pub use planner::{QueryPlan, plan};
+
+mod filter_document;

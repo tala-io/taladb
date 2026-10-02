@@ -9,6 +9,14 @@ import { validateConfig, loadConfig } from '../src/config';
 // ---------------------------------------------------------------------------
 
 describe('validateConfig', () => {
+  it('validates retained vector-cache budgets', () => {
+    for (const bytes of [0, 8 * 1024 * 1024, 64 * 1024 * 1024]) {
+      expect(() => validateConfig({ vector_cache_bytes: bytes })).not.toThrow();
+    }
+    for (const bytes of [-1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => validateConfig({ vector_cache_bytes: bytes })).toThrow('vector_cache_bytes');
+    }
+  });
   it('accepts an empty config', () => {
     expect(() => validateConfig({})).not.toThrow();
   });

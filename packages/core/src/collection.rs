@@ -28,9 +28,8 @@ use crate::query::options::{
 use crate::query::planner::plan_full;
 use crate::time::now_ms;
 use crate::vector::{
-    CachedVectors, HnswOptions, META_HNSW_TABLE, META_VECTOR_TABLE, SharedVectorCache, VectorDef,
-    VectorMetric, VectorSearchResult, decode_f32_vec, encode_f32_vec, value_to_f32_vec,
-    vec_meta_key, vec_table_name,
+    HnswOptions, META_HNSW_TABLE, META_VECTOR_TABLE, VectorDef, VectorMetric, VectorSearchResult,
+    decode_f32_vec, encode_f32_vec, value_to_f32_vec, vec_meta_key, vec_table_name,
 };
 #[path = "vector_api.rs"]
 mod vector_api;
@@ -168,11 +167,7 @@ pub struct Collection {
     /// handles from the same `Database` and invalidated by the collection's
     /// write generation (see [`crate::watch`]). Always present because exact
     /// search remains available alongside HNSW on every platform.
-    vector_cache: SharedVectorCache,
-    /// Decoded HNSW nodes, retained across queries and shared with every handle
-    /// from the same `Database`. Keyed by graph table, pinned to the vector
-    /// revision it was read at.
-    node_cache: crate::vector_graph::SharedNodeCache,
+    search_cache: crate::search_cache::SharedSearchCache,
 }
 
 impl Collection {
@@ -185,8 +180,7 @@ impl Collection {
             audit_caller: None,
             #[cfg(feature = "encryption")]
             field_encryption: None,
-            vector_cache: crate::vector::new_shared_vector_cache(),
-            node_cache: crate::vector_graph::new_shared_node_cache(),
+            search_cache: crate::search_cache::new_shared_search_cache(),
         }
     }
 
@@ -241,8 +235,7 @@ impl Collection {
             audit_caller: None,
             #[cfg(feature = "encryption")]
             field_encryption: self.field_encryption.clone(),
-            vector_cache: Arc::clone(&self.vector_cache),
-            node_cache: Arc::clone(&self.node_cache),
+            search_cache: Arc::clone(&self.search_cache),
         }
     }
 
@@ -286,40 +279,23 @@ impl Collection {
         self
     }
 
-    /// Attach the shared decoded-vector cache (called by `Database::collection()`
-    /// so all handles from the same `Database` share one cache and invalidate
-    /// each other's entries on write).
-    pub(crate) fn with_vector_cache(mut self, cache: SharedVectorCache) -> Self {
-        self.vector_cache = cache;
+    pub(crate) fn with_search_cache(
+        mut self,
+        cache: crate::search_cache::SharedSearchCache,
+    ) -> Self {
+        self.search_cache = cache;
         self
     }
 
-    /// Attach the shared decoded-HNSW-node cache (called by
-    /// `Database::collection()` alongside `with_vector_cache`).
-    pub(crate) fn with_node_cache(mut self, cache: crate::vector_graph::SharedNodeCache) -> Self {
-        self.node_cache = cache;
-        self
+    pub(crate) fn node_cache(&self) -> &crate::search_cache::SharedSearchCache {
+        &self.search_cache
     }
 
-    /// Borrow the shared graph-node cache. `search_vectors` takes the entry out
-    /// for the duration of a query and puts it back, rather than holding the
-    /// lock across the search.
-    pub(crate) fn node_cache(&self) -> &crate::vector_graph::SharedNodeCache {
-        &self.node_cache
-    }
-
-    /// Drop retained graph nodes for a field's graph.
-    ///
-    /// Data writes invalidate through the vector revision, but `create`/`drop`/
-    /// rebuild rewrite the graph without bumping it — the same hole
-    /// `evict_vector_cache` exists to close for the flat path.
     pub(crate) fn evict_node_cache(&self, field: &str) {
-        let table = crate::vector::hnsw_table_name(&self.name, field);
-        let mut cache = self
-            .node_cache
+        self.search_cache
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        cache.remove(&table);
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .evict_field(&self.name, field);
     }
 
     /// Encrypt nominated fields in `doc` in-place, if field encryption is
@@ -471,12 +447,7 @@ impl Collection {
     /// via the write generation, but `create`/`drop_vector_index` rewrite the
     /// vec table without bumping it, so they evict explicitly.
     fn evict_vector_cache(&self, field: &str) {
-        let key = format!("{}::{}", self.name, field);
-        let mut cache = self
-            .vector_cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        cache.remove(&key);
+        self.evict_node_cache(field);
     }
 
     fn load_indexes_in(&self, rtxn: &dyn ReadTxn) -> Result<CachedIndexes, TalaDbError> {
@@ -1343,7 +1314,7 @@ impl Collection {
         top_k: usize,
         pre_filter: Option<Filter>,
     ) -> Result<(Vec<VectorSearchResult>, usize), TalaDbError> {
-        use crate::vector::{Candidate, DEFAULT_VECTOR_CACHE_BYTES, VectorBlock};
+        use crate::vector::{Candidate, VectorBlock};
         use std::cmp::Reverse;
         use std::collections::BinaryHeap;
         let cache = self.load_indexes_in(txn)?;
@@ -1411,13 +1382,17 @@ impl Collection {
                 }
             }
         } else {
-            let cached = self
-                .vector_cache
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .get(&cache_key)
-                .filter(|c| c.generation == generation)
-                .map(|c| Arc::clone(&c.vectors));
+            let (cached, budget, epoch) = {
+                let mut cache = self
+                    .search_cache
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                (
+                    cache.vectors(&cache_key, generation),
+                    cache.budget(),
+                    cache.epoch,
+                )
+            };
             if let Some(block) = cached {
                 for (id, values) in block
                     .ids
@@ -1430,7 +1405,7 @@ impl Collection {
                 let count = usize::try_from(txn.count_entries(&table)?).unwrap_or(usize::MAX);
                 let estimate =
                     count.checked_mul(def.dimensions.saturating_mul(4).saturating_add(16));
-                let retain = estimate.is_some_and(|n| n <= DEFAULT_VECTOR_CACHE_BYTES);
+                let retain = estimate.is_some_and(|n| n <= budget && budget > 0);
                 let mut block = VectorBlock {
                     dimensions: def.dimensions,
                     ..Default::default()
@@ -1459,27 +1434,11 @@ impl Collection {
                         Ok(crate::engine::ScanFlow::Continue)
                     },
                 )?;
-                if retain && block.bytes() <= DEFAULT_VECTOR_CACHE_BYTES {
-                    let mut cache = self
-                        .vector_cache
+                if retain && block.bytes() <= budget {
+                    self.search_cache
                         .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let used: usize = cache.values().map(|c| c.vectors.bytes()).sum();
-                    if used.saturating_add(block.bytes()) > DEFAULT_VECTOR_CACHE_BYTES {
-                        cache.clear();
-                    }
-                    if cache
-                        .get(&cache_key)
-                        .is_none_or(|c| c.generation <= generation)
-                    {
-                        cache.insert(
-                            cache_key,
-                            CachedVectors {
-                                generation,
-                                vectors: Arc::new(block),
-                            },
-                        );
-                    }
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert_vectors(&cache_key, generation, block, epoch);
                 }
             }
         }
@@ -1500,9 +1459,21 @@ impl Collection {
         rtxn: &dyn ReadTxn,
         scored: Vec<(ulid::Ulid, f32)>,
     ) -> Result<Vec<VectorSearchResult>, TalaDbError> {
+        self.load_results_limited_in(rtxn, scored, None)
+    }
+
+    pub(super) fn load_results_limited_in(
+        &self,
+        rtxn: &dyn ReadTxn,
+        scored: Vec<(ulid::Ulid, f32)>,
+        limit: Option<usize>,
+    ) -> Result<Vec<VectorSearchResult>, TalaDbError> {
         let docs_table = docs_table_name(&self.name);
-        let mut results = Vec::with_capacity(scored.len());
+        let mut results = Vec::with_capacity(limit.map_or(scored.len(), |n| n.min(scored.len())));
         for (id, score) in scored {
+            if limit.is_some_and(|n| results.len() >= n) {
+                break;
+            }
             if let Some(bytes) = rtxn.get(&docs_table, &id.to_bytes())? {
                 let mut document: Document = postcard::from_bytes(&bytes)?;
                 // Match `find`: encrypted fields come back as plaintext.
