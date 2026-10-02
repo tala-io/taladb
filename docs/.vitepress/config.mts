@@ -143,6 +143,8 @@ export default defineConfig({
           { text: "Web (Browser / WASM)", link: "/guide/web" },
           { text: "Node.js", link: "/guide/node" },
           { text: "React Native", link: "/guide/react-native" },
+          { text: "Android (Kotlin) · early", link: "/guide/android" },
+          { text: "iOS & macOS (Swift) · early", link: "/guide/swift" },
           { text: "CLI Dev Tools", link: "/guide/cli" },
         ],
       },

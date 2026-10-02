@@ -25,6 +25,8 @@ The same Rust core powers every runtime:
 
 All three surfaces expose a single unified TypeScript API from the `taladb` package, so application code never needs to branch on platform.
 
+Native apps can use the same engine without React Native through first-party packages over the C FFI — [Android (Kotlin)](/guide/android) and [iOS & macOS (Swift)](/guide/swift). Both are **early releases**.
+
 ## Architecture overview
 
 TalaDB is built in three layers:
@@ -142,5 +144,7 @@ They meet where an app needs both — locally queryable data that must also reac
 ## Status
 
 TalaDB is production-ready. The Rust core, browser WASM, Node.js bindings, and React Native JSI layer are fully functional, tested, and stable across all supported platforms.
+
+The native [Kotlin](/guide/android) and [Swift](/guide/swift) packages are an **early release**: they cover documents, indexes, vector, full-text and hybrid search, live queries, migrations and encryption, and are tested against the same engine, but their APIs may still change and they are not yet published to Maven Central or SwiftPM.
 
 Try the [web demo](https://demo-web.taladb.dev/) to see TalaDB running in the browser with OPFS persistence and on-device semantic search, or the [mobile demo](https://appetize.io/app/b_ugmjhjghdkgnjux4lzkepvsfma) to see it running on React Native. Follow the [GitHub repository](https://github.com/tala-io/taladb) for progress updates.
