@@ -14,8 +14,8 @@ queries and encryption at rest, in one file, inside your process.
 ::: warning Early release
 The `taladb` crate is new, and its API may still change between minor
 versions before 1.0. It is published to [crates.io](https://crates.io/crates/taladb)
-with each TalaDB release, starting with the next one; until then, use the git
-dependency below. The full API reference is on [docs.rs](https://docs.rs/taladb).
+with each TalaDB release, starting with 0.12.0; before that reaches crates.io,
+use the git dependency below. The full API reference is on [docs.rs](https://docs.rs/taladb).
 :::
 
 ## Installation
