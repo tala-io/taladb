@@ -327,13 +327,12 @@ const FNV1A128_PRIME: u128 = 0x0000_0000_0100_0000_0000_0000_0000_013b;
 
 /// Derive a stable, deterministic [`Ulid`] from a remote primary key.
 ///
-/// The engine assigns ULIDs and **ignores caller-supplied `_id`s**, so a
-/// document replicated from a remote origin has no stable local identity to
-/// merge on: re-fetching the same row would insert a duplicate. Hashing the
-/// remote key into the ULID gives that identity back — the same `(collection,
-/// key)` always maps to the same document, which is what makes replication
-/// upserts idempotent, resumable, and safe to run concurrently from the
-/// bootstrap walk and an on-demand fetch.
+/// The engine accepts a caller-supplied `_id` only if it is a ULID (see
+/// `take_supplied_id` in `collection.rs`), so a natural key — a SKU, a remote
+/// primary key, the name of a singleton settings document — cannot be stored
+/// as one directly. Hashing the key into a ULID gives it a stable identity:
+/// the same `(collection, key)` always maps to the same document, so a seed or
+/// a hydration from a server can be re-run without inserting duplicates.
 ///
 /// `collection` is part of the preimage so the same remote id in two different
 /// collections cannot collide.

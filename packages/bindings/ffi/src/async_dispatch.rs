@@ -24,7 +24,7 @@ fn filter(args: &[Json], i: usize) -> Result<Filter, String> {
 pub(super) fn execute(h: &TalaDbHandle, op: &str, args: &[Json]) -> Result<Json, String> {
     macro_rules! core {
         ($e:expr) => {
-            $e.map_err(|e| e.to_string())?
+            $e.map_err(crate::engine_error)?
         };
     }
     match op {

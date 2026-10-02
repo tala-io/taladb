@@ -35,6 +35,16 @@
 //! `taladb_last_error()` describes *that* call — a message if it failed, NULL
 //! if it succeeded.
 //!
+//! [`taladb_last_error_code`] adds the engine's stable error code
+//! ([`TalaDbError::code`](taladb_core::TalaDbError::code): `"Encryption"`,
+//! `"InvalidFilter"`, `"DuplicateId"`, …) — the same strings the JavaScript
+//! bindings expose as `error.code` — so a caller can branch on the kind of
+//! failure instead of parsing a message. Engine errors become strings deep in
+//! the dispatch code, so [`engine_error`] records the code beside the exact
+//! message it produced, and [`set_last_error`] attaches it only when the
+//! message it is given is that one. A failure that is not an engine error
+//! (a null pointer, malformed arguments) has no code.
+//!
 //! # Safety
 //!
 //! All exported functions follow these invariants:
@@ -59,7 +69,7 @@
 
 mod async_dispatch;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::path::Path;
@@ -72,12 +82,54 @@ use taladb_core::{Database, Filter, TalaDbConfig, Update, Value, VectorMetric};
 
 thread_local! {
     static LAST_ERROR: RefCell<Option<CString>> = const { RefCell::new(None) };
+    static LAST_ERROR_CODE: Cell<Option<&'static CStr>> = const { Cell::new(None) };
+    /// The code of the engine error most recently turned into a message on
+    /// this thread, with that message, until [`set_last_error`] claims it.
+    static PENDING_CODE: RefCell<Option<(&'static str, String)>> = const { RefCell::new(None) };
+}
+
+/// Turn an engine error into its message, remembering its stable code so the
+/// failure this message is reported as can carry it (see *Error reporting*).
+pub(crate) fn engine_error(e: taladb_core::TalaDbError) -> String {
+    let message = e.to_string();
+    PENDING_CODE.with(|p| *p.borrow_mut() = Some((e.code(), message.clone())));
+    message
+}
+
+/// Take the code recorded for `msg` on this thread, if `msg` is the message an
+/// engine error produced. Anything else pending is stale and dropped.
+fn take_code_for(msg: &str) -> Option<&'static str> {
+    PENDING_CODE
+        .with(|p| p.borrow_mut().take())
+        .and_then(|(code, m)| (m == msg).then_some(code))
+}
+
+/// The engine's codes as C strings. `TalaDbError::code` returns a fixed set
+/// of `'static` strings, so each is converted once and leaked: a bounded set,
+/// and the pointer [`taladb_last_error_code`] returns then never dangles.
+fn code_cstr(code: &'static str) -> &'static CStr {
+    static CODES: Mutex<Vec<&'static CStr>> = Mutex::new(Vec::new());
+    let mut codes = CODES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(existing) = codes.iter().find(|c| c.to_bytes() == code.as_bytes()) {
+        return existing;
+    }
+    let leaked: &'static CStr =
+        Box::leak(CString::new(code).unwrap_or_default().into_boxed_c_str());
+    codes.push(leaked);
+    leaked
 }
 
 fn set_last_error(msg: String) {
+    set_last_error_with_code(take_code_for(&msg), msg);
+}
+
+fn set_last_error_with_code(code: Option<&'static str>, msg: String) {
     LAST_ERROR.with(|e| {
         *e.borrow_mut() = CString::new(msg).ok();
     });
+    LAST_ERROR_CODE.with(|c| c.set(code.map(code_cstr)));
 }
 
 /// Drop any message left by an earlier call on this thread.
@@ -90,6 +142,8 @@ fn clear_last_error() {
     LAST_ERROR.with(|e| {
         *e.borrow_mut() = None;
     });
+    LAST_ERROR_CODE.with(|c| c.set(None));
+    PENDING_CODE.with(|p| *p.borrow_mut() = None);
 }
 
 /// Return the last error message as a null-terminated C string, or NULL if no error.
@@ -110,6 +164,20 @@ pub extern "C" fn taladb_last_error() -> *const c_char {
     })
 }
 
+/// The engine's stable code for the error [`taladb_last_error`] describes —
+/// `"Encryption"` for a wrong passphrase, `"InvalidFilter"`, `"DuplicateId"`,
+/// and the rest of `TalaDbError::code` — or NULL when the last call succeeded
+/// or failed outside the engine (a null pointer, malformed arguments).
+///
+/// Codes are a public contract shared with the JavaScript bindings' `error.code`:
+/// new ones may be added, an existing one never changes meaning. Read it in the
+/// same native call as the message; like the message, it is thread-local.
+/// The returned string is static. Do NOT free it.
+#[unsafe(no_mangle)]
+pub extern "C" fn taladb_last_error_code() -> *const c_char {
+    LAST_ERROR_CODE.with(|c| c.get().map_or(std::ptr::null(), CStr::as_ptr))
+}
+
 // ---------------------------------------------------------------------------
 // ABI version
 // ---------------------------------------------------------------------------
@@ -119,9 +187,9 @@ pub extern "C" fn taladb_last_error() -> *const c_char {
 ///
 /// - 1 — through 0.11.8.
 /// - 2 — the six index create/drop functions return `int32_t` instead of
-///   `void`; `taladb_call`, `taladb_ffi_abi_version` and the live-query
-///   functions (`taladb_watch`, `taladb_watch_next`, `taladb_watch_close`)
-///   added.
+///   `void`; `taladb_call`, `taladb_ffi_abi_version`, `taladb_last_error_code`
+///   and the live-query functions (`taladb_watch`, `taladb_watch_next`,
+///   `taladb_watch_close`) added.
 pub const TALADB_FFI_ABI_VERSION: u32 = 2;
 
 /// The [`TALADB_FFI_ABI_VERSION`] this library was built with.
@@ -187,7 +255,7 @@ pub unsafe extern "C" fn taladb_open(path: *const c_char) -> *mut TalaDbHandle {
         match Database::open(Path::new(path_str)) {
             Ok(db) => Box::into_raw(Box::new(TalaDbHandle { db })),
             Err(e) => {
-                set_last_error(e.to_string());
+                set_last_error(engine_error(e));
                 std::ptr::null_mut()
             }
         }
@@ -343,7 +411,7 @@ pub unsafe extern "C" fn taladb_open_with_config(
                 Box::into_raw(Box::new(TalaDbHandle { db }))
             }
             Err(e) => {
-                set_last_error(e.to_string());
+                set_last_error(engine_error(e));
                 std::ptr::null_mut()
             }
         }
@@ -360,7 +428,7 @@ pub unsafe extern "C" fn taladb_compact(handle: *mut TalaDbHandle) -> i32 {
             Some(h) => match h.db.compact() {
                 Ok(()) => 1,
                 Err(e) => {
-                    set_last_error(e.to_string());
+                    set_last_error(engine_error(e));
                     -1
                 }
             },
@@ -420,14 +488,14 @@ pub unsafe extern "C" fn taladb_insert(
         let col = match h.collection(&col_name) {
             Ok(c) => c,
             Err(e) => {
-                set_last_error(e.to_string());
+                set_last_error(engine_error(e));
                 return std::ptr::null_mut();
             }
         };
         match col.insert(fields) {
             Ok(id) => to_cstring(id.to_string()),
             Err(e) => {
-                set_last_error(e.to_string());
+                set_last_error(engine_error(e));
                 std::ptr::null_mut()
             }
         }
@@ -479,7 +547,7 @@ pub unsafe extern "C" fn taladb_insert_many(
         let col = match h.collection(&col_name) {
             Ok(c) => c,
             Err(e) => {
-                set_last_error(e.to_string());
+                set_last_error(engine_error(e));
                 return std::ptr::null_mut();
             }
         };
@@ -489,7 +557,7 @@ pub unsafe extern "C" fn taladb_insert_many(
                 to_cstring(serde_json::to_string(&id_strs).unwrap_or_default())
             }
             Err(e) => {
-                set_last_error(e.to_string());
+                set_last_error(engine_error(e));
                 std::ptr::null_mut()
             }
         }
@@ -526,7 +594,7 @@ pub unsafe extern "C" fn taladb_find(
         let col = match db.collection(&col_name) {
             Ok(c) => c,
             Err(e) => {
-                set_last_error(e.to_string());
+                set_last_error(engine_error(e));
                 return std::ptr::null_mut();
             }
         };
@@ -536,7 +604,7 @@ pub unsafe extern "C" fn taladb_find(
                 to_cstring(serde_json::to_string(&json_docs).unwrap_or_default())
             }
             Err(e) => {
-                set_last_error(e.to_string());
+                set_last_error(engine_error(e));
                 std::ptr::null_mut()
             }
         }
@@ -567,7 +635,7 @@ pub unsafe extern "C" fn taladb_find_one(
         let col = match db.collection(&col_name) {
             Ok(c) => c,
             Err(e) => {
-                set_last_error(e.to_string());
+                set_last_error(engine_error(e));
                 return std::ptr::null_mut();
             }
         };
@@ -575,7 +643,7 @@ pub unsafe extern "C" fn taladb_find_one(
             Ok(Some(doc)) => to_cstring(doc_to_json(&doc).to_string()),
             Ok(None) => to_cstring("null".to_string()),
             Err(e) => {
-                set_last_error(e.to_string());
+                set_last_error(engine_error(e));
                 std::ptr::null_mut()
             }
         }
@@ -613,7 +681,7 @@ pub unsafe extern "C" fn taladb_update_one(
                 let collection = match h.collection(&col) {
                     Ok(c) => c,
                     Err(e) => {
-                        set_last_error(e.to_string());
+                        set_last_error(engine_error(e));
                         return -1;
                     }
                 };
@@ -622,7 +690,7 @@ pub unsafe extern "C" fn taladb_update_one(
                         Ok(true) => 1,
                         Ok(false) => 0,
                         Err(e) => {
-                            set_last_error(e.to_string());
+                            set_last_error(engine_error(e));
                             -1
                         }
                     },
@@ -666,7 +734,7 @@ pub unsafe extern "C" fn taladb_update_many(
                 let collection = match h.collection(&col) {
                     Ok(c) => c,
                     Err(e) => {
-                        set_last_error(e.to_string());
+                        set_last_error(engine_error(e));
                         return -1;
                     }
                 };
@@ -674,7 +742,7 @@ pub unsafe extern "C" fn taladb_update_many(
                     Some(update) => match collection.update_many(filter, update) {
                         Ok(n) => n as i32,
                         Err(e) => {
-                            set_last_error(e.to_string());
+                            set_last_error(engine_error(e));
                             -1
                         }
                     },
@@ -713,7 +781,7 @@ pub unsafe extern "C" fn taladb_delete_one(
         let col = match h.collection(&col_name) {
             Ok(c) => c,
             Err(e) => {
-                set_last_error(e.to_string());
+                set_last_error(engine_error(e));
                 return -1;
             }
         };
@@ -728,7 +796,7 @@ pub unsafe extern "C" fn taladb_delete_one(
             Ok(true) => 1,
             Ok(false) => 0,
             Err(e) => {
-                set_last_error(e.to_string());
+                set_last_error(engine_error(e));
                 -1
             }
         }
@@ -753,7 +821,7 @@ pub unsafe extern "C" fn taladb_delete_many(
         let col = match h.collection(&col_name) {
             Ok(c) => c,
             Err(e) => {
-                set_last_error(e.to_string());
+                set_last_error(engine_error(e));
                 return -1;
             }
         };
@@ -767,7 +835,7 @@ pub unsafe extern "C" fn taladb_delete_many(
         match col.delete_many(filter) {
             Ok(n) => n as i32,
             Err(e) => {
-                set_last_error(e.to_string());
+                set_last_error(engine_error(e));
                 -1
             }
         }
@@ -795,7 +863,7 @@ pub unsafe extern "C" fn taladb_count(
         let col = match db.collection(&col_name) {
             Ok(c) => c,
             Err(e) => {
-                set_last_error(e.to_string());
+                set_last_error(engine_error(e));
                 return -1;
             }
         };
@@ -809,7 +877,7 @@ pub unsafe extern "C" fn taladb_count(
         match col.count(filter) {
             Ok(n) => n as i32,
             Err(e) => {
-                set_last_error(e.to_string());
+                set_last_error(engine_error(e));
                 -1
             }
         }
@@ -840,7 +908,11 @@ pub unsafe extern "C" fn taladb_aggregate(
             }
         };
         let pipeline = match taladb_core::aggregate::parse_pipeline(&value, &|v| {
-            json_to_filter(v).ok_or_else(|| "invalid filter in $match".to_string())
+            json_to_filter(v).ok_or_else(|| {
+                engine_error(taladb_core::TalaDbError::InvalidFilter(
+                    "in $match stage".into(),
+                ))
+            })
         }) {
             Ok(p) => p,
             Err(e) => {
@@ -851,7 +923,7 @@ pub unsafe extern "C" fn taladb_aggregate(
         let col = match db.collection(&col_name) {
             Ok(c) => c,
             Err(e) => {
-                set_last_error(e.to_string());
+                set_last_error(engine_error(e));
                 return std::ptr::null_mut();
             }
         };
@@ -861,7 +933,7 @@ pub unsafe extern "C" fn taladb_aggregate(
                 to_cstring(serde_json::to_string(&json_docs).unwrap_or_default())
             }
             Err(e) => {
-                set_last_error(e.to_string());
+                set_last_error(engine_error(e));
                 std::ptr::null_mut()
             }
         }
@@ -890,7 +962,7 @@ pub unsafe extern "C" fn taladb_list_collection_names(handle: *mut TalaDbHandle)
                 }
             },
             Err(e) => {
-                set_last_error(e.to_string());
+                set_last_error(engine_error(e));
                 std::ptr::null_mut()
             }
         }
@@ -910,7 +982,7 @@ pub unsafe extern "C" fn taladb_user_version(handle: *mut TalaDbHandle) -> i64 {
         match h.db.user_version() {
             Ok(v) => i64::from(v),
             Err(e) => {
-                set_last_error(e.to_string());
+                set_last_error(engine_error(e));
                 -1
             }
         }
@@ -929,7 +1001,7 @@ pub unsafe extern "C" fn taladb_set_user_version(handle: *mut TalaDbHandle, vers
         match h.db.set_user_version(version) {
             Ok(()) => 0,
             Err(e) => {
-                set_last_error(e.to_string());
+                set_last_error(engine_error(e));
                 -1
             }
         }
@@ -949,7 +1021,7 @@ pub unsafe extern "C" fn taladb_flush(handle: *mut TalaDbHandle) -> i32 {
         match h.db.flush() {
             Ok(()) => 0,
             Err(e) => {
-                set_last_error(e.to_string());
+                set_last_error(engine_error(e));
                 -1
             }
         }
@@ -990,7 +1062,7 @@ unsafe fn index_op(
         };
         let result =
             h.db.collection(&col)
-                .map_err(|e| e.to_string())
+                .map_err(engine_error)
                 .and_then(|c| op(&c, &arg));
         match result {
             Ok(()) => 1,
@@ -1018,7 +1090,7 @@ pub unsafe extern "C" fn taladb_create_index(
 ) -> i32 {
     unsafe {
         index_op(handle, collection, field, |c, f| {
-            c.create_index(f).map_err(|e| e.to_string())
+            c.create_index(f).map_err(engine_error)
         })
     }
 }
@@ -1033,7 +1105,7 @@ pub unsafe extern "C" fn taladb_drop_index(
 ) -> i32 {
     unsafe {
         index_op(handle, collection, field, |c, f| {
-            c.drop_index(f).map_err(|e| e.to_string())
+            c.drop_index(f).map_err(engine_error)
         })
     }
 }
@@ -1050,7 +1122,7 @@ pub unsafe extern "C" fn taladb_create_compound_index(
         index_op(handle, collection, fields_json, |c, fj| {
             let fields = compound_fields(fj)?;
             let refs: Vec<&str> = fields.iter().map(String::as_str).collect();
-            c.create_compound_index(&refs).map_err(|e| e.to_string())
+            c.create_compound_index(&refs).map_err(engine_error)
         })
     }
 }
@@ -1067,7 +1139,7 @@ pub unsafe extern "C" fn taladb_drop_compound_index(
         index_op(handle, collection, fields_json, |c, fj| {
             let fields = compound_fields(fj)?;
             let refs: Vec<&str> = fields.iter().map(String::as_str).collect();
-            c.drop_compound_index(&refs).map_err(|e| e.to_string())
+            c.drop_compound_index(&refs).map_err(engine_error)
         })
     }
 }
@@ -1082,7 +1154,7 @@ pub unsafe extern "C" fn taladb_create_fts_index(
 ) -> i32 {
     unsafe {
         index_op(handle, collection, field, |c, f| {
-            c.create_fts_index(f).map_err(|e| e.to_string())
+            c.create_fts_index(f).map_err(engine_error)
         })
     }
 }
@@ -1097,7 +1169,7 @@ pub unsafe extern "C" fn taladb_drop_fts_index(
 ) -> i32 {
     unsafe {
         index_op(handle, collection, field, |c, f| {
-            c.drop_fts_index(f).map_err(|e| e.to_string())
+            c.drop_fts_index(f).map_err(engine_error)
         })
     }
 }
@@ -1156,7 +1228,7 @@ pub unsafe extern "C" fn taladb_search_text(
                 to_cstring(serde_json::to_string(&arr).unwrap_or_default())
             }
             Err(e) => {
-                set_last_error(e.to_string());
+                set_last_error(engine_error(e));
                 std::ptr::null_mut()
             }
         }
@@ -1246,7 +1318,7 @@ pub unsafe extern "C" fn taladb_hybrid_search(
                 to_cstring(serde_json::to_string(&arr).unwrap_or_default())
             }
             Err(e) => {
-                set_last_error(e.to_string());
+                set_last_error(engine_error(e));
                 std::ptr::null_mut()
             }
         }
@@ -1490,9 +1562,14 @@ fn json_to_fields(json: &str) -> Option<Vec<(String, Value)>> {
 /// Parse a filter JSON string. `"null"` and `"{}"` mean match-all; anything
 /// unparseable is an error, never a silent match-all.
 fn parse_filter(json: &str) -> Result<Filter, String> {
-    let v: serde_json::Value =
-        serde_json::from_str(json).map_err(|e| format!("invalid filter JSON: {e}"))?;
-    taladb_core::json::filter_from_json(&v).map_err(|e| e.to_string())
+    // Errors are the engine's InvalidFilter, with its code, so a bad filter
+    // reads the same through the FFI as through the JavaScript bindings.
+    let v: serde_json::Value = serde_json::from_str(json).map_err(|e| {
+        engine_error(taladb_core::TalaDbError::InvalidFilter(format!(
+            "not valid JSON ({e})"
+        )))
+    })?;
+    taladb_core::json::filter_from_json(&v).map_err(engine_error)
 }
 
 fn json_to_filter(v: &serde_json::Value) -> Option<Filter> {
@@ -1560,14 +1637,14 @@ pub unsafe extern "C" fn taladb_create_vector_index(
         let c = match h.db.collection(&col) {
             Ok(c) => c,
             Err(e) => {
-                set_last_error(e.to_string());
+                set_last_error(engine_error(e));
                 return -1;
             }
         };
         match c.create_vector_index_with_options(&fld, dimensions, m, hnsw) {
             Ok(()) => 1,
             Err(e) => {
-                set_last_error(e.to_string());
+                set_last_error(engine_error(e));
                 -1
             }
         }
@@ -1599,7 +1676,7 @@ pub unsafe extern "C" fn taladb_drop_vector_index(
         {
             Ok(()) => 1,
             Err(e) => {
-                set_last_error(e.to_string());
+                set_last_error(engine_error(e));
                 -1
             }
         }
@@ -1632,7 +1709,7 @@ pub unsafe extern "C" fn taladb_upgrade_vector_index(
         {
             Ok(()) => 1,
             Err(e) => {
-                set_last_error(e.to_string());
+                set_last_error(engine_error(e));
                 -1
             }
         }
@@ -1660,7 +1737,7 @@ pub unsafe extern "C" fn taladb_rebuild_hnsw_indexes(handle: *mut TalaDbHandle) 
         match h.db.rebuild_hnsw_indexes() {
             Ok(()) => 1,
             Err(e) => {
-                set_last_error(e.to_string());
+                set_last_error(engine_error(e));
                 -1
             }
         }
@@ -1761,7 +1838,7 @@ pub unsafe extern "C" fn taladb_find_nearest(
         match run_find_nearest(&h.db, &col, &fld, query, top_k, filter) {
             Ok(json) => to_cstring(json),
             Err(e) => {
-                set_last_error(e.to_string());
+                set_last_error(engine_error(e));
                 std::ptr::null_mut()
             }
         }
@@ -1779,10 +1856,14 @@ pub unsafe extern "C" fn taladb_find_nearest(
 // caller may close the original `TalaDbHandle` while a job is in flight.
 // ---------------------------------------------------------------------------
 
+/// A job's outcome, with the engine error code of a failure: the code is
+/// recorded on the worker thread and the message is read on the caller's.
+type JobOutcome = (Result<String, String>, Option<&'static str>);
+
 /// A background job handle. Opaque to the caller.
 pub struct TalaDbJob {
     done: Arc<AtomicBool>,
-    result: Arc<Mutex<Option<Result<String, String>>>>,
+    result: Arc<Mutex<Option<JobOutcome>>>,
     // Join handle kept so we can join on take_result to avoid races.
     thread: Mutex<Option<JoinHandle<()>>>,
 }
@@ -1907,10 +1988,11 @@ where
                         .unwrap_or_else(|| "unknown panic payload".to_owned())
                 )),
             };
+            let code = r.as_ref().err().and_then(|msg| take_code_for(msg));
             let mut slot = result_thread
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *slot = Some(r);
+            *slot = Some((r, code));
         });
 
     let t = match spawned {
@@ -1985,7 +2067,7 @@ pub unsafe extern "C" fn taladb_job_take_result(job: *mut TalaDbJob) -> *mut c_c
             };
             g.take()
         };
-        let r = match r {
+        let (r, code) = match r {
             Some(r) => r,
             None if worker_panicked => {
                 set_last_error(
@@ -2003,7 +2085,7 @@ pub unsafe extern "C" fn taladb_job_take_result(job: *mut TalaDbJob) -> *mut c_c
         match r {
             Ok(json) => to_cstring(json),
             Err(e) => {
-                set_last_error(e);
+                set_last_error_with_code(code, e);
                 std::ptr::null_mut()
             }
         }
@@ -2141,7 +2223,7 @@ pub unsafe extern "C" fn taladb_watch(
                 inner: Mutex::new(c.watch(filter)),
             })),
             Err(e) => {
-                set_last_error(e.to_string());
+                set_last_error(engine_error(e));
                 std::ptr::null_mut()
             }
         }
@@ -2190,7 +2272,7 @@ pub unsafe extern "C" fn taladb_watch_next(
             }
             Ok(None) => 0,
             Err(e) => {
-                set_last_error(e.to_string());
+                set_last_error(engine_error(e));
                 -1
             }
         }
@@ -2222,7 +2304,7 @@ fn check_call_size(args_json: &str) -> Result<(), String> {
 /// synchronous [`taladb_call`] and the background [`taladb_call_start`].
 fn execute_call(h: &TalaDbHandle, op: &str, args_json: &str) -> Result<String, String> {
     let parsed: serde_json::Value = serde_json::from_str(args_json).map_err(|e| e.to_string())?;
-    taladb_core::json_depth::check_json_depth(&parsed).map_err(|e| e.to_string())?;
+    taladb_core::json_depth::check_json_depth(&parsed).map_err(engine_error)?;
     let args = parsed.as_array().ok_or("arguments must be an array")?;
     async_dispatch::execute(h, op, args).map(|v| v.to_string())
 }
@@ -2280,7 +2362,7 @@ pub unsafe extern "C" fn taladb_find_nearest_start(
                 top_k,
                 filter_owned.as_deref(),
             )
-            .map_err(|e| e.to_string())
+            .map_err(engine_error)
         })
     })
 }
@@ -2307,9 +2389,9 @@ pub unsafe extern "C" fn taladb_find_start(
             unsafe { cstr_to_string(filter_json) }.unwrap_or_else(|| "{}".to_string());
 
         spawn_job(handle, move |h| {
-            let collection = h.db.collection(&col).map_err(|e| e.to_string())?;
+            let collection = h.db.collection(&col).map_err(engine_error)?;
             let filter = parse_filter(&filter_owned)?;
-            let docs = collection.find(filter).map_err(|e| e.to_string())?;
+            let docs = collection.find(filter).map_err(engine_error)?;
             let json_docs: Vec<serde_json::Value> = docs.iter().map(doc_to_json).collect();
             serde_json::to_string(&json_docs).map_err(|e| e.to_string())
         })
@@ -3289,6 +3371,96 @@ mod tests {
             taladb_free_string(id);
             taladb_close(handle);
         }
+    }
+
+    fn last_error_code() -> Option<String> {
+        let ptr = taladb_last_error_code();
+        (!ptr.is_null()).then(|| {
+            unsafe { CStr::from_ptr(ptr) }
+                .to_string_lossy()
+                .into_owned()
+        })
+    }
+
+    /// The engine's stable code travels with its message, through the sync
+    /// call path, so a caller can tell a bad filter from a storage failure
+    /// without parsing text.
+    #[test]
+    fn engine_errors_carry_their_code() {
+        let (handle, _dir) = open_temp_db();
+        let find = cstr("find");
+        let bad_filter = cstr(r#"["books", {"n": {"$frobnicate": 1}}]"#);
+        assert!(unsafe { taladb_call(handle, find.as_ptr(), bad_filter.as_ptr()) }.is_null());
+        assert_eq!(last_error_code().as_deref(), Some("InvalidFilter"));
+        assert!(last_error().unwrap().starts_with("invalid filter"));
+
+        let index = cstr("createIndex");
+        let field = cstr(r#"["books", "title"]"#);
+        let ok = unsafe { taladb_call(handle, index.as_ptr(), field.as_ptr()) };
+        assert!(!ok.is_null());
+        assert_eq!(
+            last_error_code(),
+            None,
+            "a success clears the code with the message"
+        );
+        unsafe { taladb_free_string(ok) };
+
+        // Misuse outside the engine has a message and no code.
+        let col = cstr("books");
+        let not_object = cstr("[]");
+        assert!(unsafe { taladb_insert(handle, col.as_ptr(), not_object.as_ptr()) }.is_null());
+        assert!(last_error().is_some());
+        assert_eq!(last_error_code(), None);
+
+        unsafe { taladb_close(handle) };
+    }
+
+    /// A background job fails on its worker thread and is read on the
+    /// caller's; the code must make the crossing.
+    #[test]
+    fn job_errors_carry_their_code_across_threads() {
+        let (handle, _dir) = open_temp_db();
+        let find = cstr("find");
+        let bad_filter = cstr(r#"["books", {"n": {"$frobnicate": 1}}]"#);
+        let job = unsafe { taladb_call_start(handle, find.as_ptr(), bad_filter.as_ptr()) };
+        if job.is_null() {
+            // Rejected up front: still the engine's code, on this thread.
+            assert_eq!(last_error_code().as_deref(), Some("InvalidFilter"));
+        } else {
+            while unsafe { taladb_job_poll(job) } == 0 {
+                std::thread::yield_now();
+            }
+            assert!(unsafe { taladb_job_take_result(job) }.is_null());
+            assert_eq!(last_error_code().as_deref(), Some("InvalidFilter"));
+        }
+        unsafe { taladb_close(handle) };
+    }
+
+    /// A wrong passphrase is the engine's "Encryption" error, worded so a
+    /// person can act on it rather than as the cipher's bare "aead::Error".
+    #[test]
+    fn wrong_passphrase_is_an_encryption_error_that_says_so() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = cstr(dir.path().join("e.db").to_str().unwrap());
+        let right = cstr(r#"{"passphrase":"right"}"#);
+        let handle = unsafe { taladb_open_with_config(path.as_ptr(), right.as_ptr()) };
+        assert!(!handle.is_null());
+        let col = cstr("c");
+        let doc = cstr(r#"{"x":1}"#);
+        let id = unsafe { taladb_insert(handle, col.as_ptr(), doc.as_ptr()) };
+        unsafe {
+            taladb_free_string(id);
+            taladb_close(handle);
+        }
+
+        let wrong = cstr(r#"{"passphrase":"wrong"}"#);
+        assert!(unsafe { taladb_open_with_config(path.as_ptr(), wrong.as_ptr()) }.is_null());
+        assert_eq!(last_error_code().as_deref(), Some("Encryption"));
+        assert!(
+            last_error().unwrap().contains("wrong passphrase"),
+            "{:?}",
+            last_error()
+        );
     }
 
     /// Reading the error must not itself clear it — JS calls it once and may
