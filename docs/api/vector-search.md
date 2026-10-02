@@ -139,6 +139,10 @@ console.log(result.hits)      // { document, score }[]
 
 `mode` is `auto` (default), `exact`, or `ann`. Auto uses a ready HNSW index for unfiltered queries and exact search under filters. Explicit ANN errors if the graph is unavailable or stale. Filtered ANN traverses nonmatching nodes as routing bridges and returns only matches; it does not promise exact recall or use filter-specific precomputed edges.
 
+Indexed scalar equalities, ranges and `$in` predicates resolve matching IDs directly from index keys. This also applies to covered AND/OR branches and equalities on every field of a compound index. Array elements keep the same matching semantics as `find`. Predicates such as negation, existence and regex still require document fields; indexed conditions narrow those reads when possible.
+
+Exact filtered searches batch vector lookups for sparse matches. Dense matches use a streaming vector scan or an existing decoded-vector cache. Filtered searches do not populate that cache. Filter keys, vectors and returned documents all come from the same read snapshot.
+
 `efSearch` defaults to 100. The effective candidate count is at least `(offset + topK) * oversampling`; oversampling defaults to 4 and accepts 1–100. Grouped ANN expands the pool when necessary. Every returned ANN score is recomputed from the original f32 vector in the same read snapshot as the filter and document.
 
 Grouping retains the highest scoring `groupSize` hits per field value before pagination. Missing and null group values form one group. `scoreThreshold` uses the index metric's similarity score, inclusive. `offset` and `nextOffset` support pagination over live queries; writes between pages can change ordering. ANN pages are approximate and increasing the candidate pool may change earlier rankings; use exact mode when stable ranking on unchanged data matters.

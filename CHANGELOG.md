@@ -15,6 +15,8 @@
 
 - Removed repeated sign-to-float expansion from binary HNSW construction by comparing packed codes directly. Similarity scores and the stored format are unchanged; searches retain full-precision queries and exact rescoring. CI now measures both synchronous and resumable binary builds.
 
+- Resolve covered vector filters from secondary-index keys, including scalar equality, ranges, `$in`, covered AND/OR branches and complete compound equalities. Residual predicates still read document fields. Exact filtered searches batch sparse vector lookups and use streaming scans or an existing decoded cache for dense matches, without populating the full-vector cache. Fixed indexed two-sided ranges on arrays and inclusive bounds at signed zero. Native CI now compares sparse, moderate, dense and range filters in exact and ANN modes with cold and warm vector caches.
+
 ## 0.11.9 — 2026-10-02
 
 Groundwork for first-party Kotlin and Swift packages that wrap the C FFI directly, without React Native. Those packages live in their own repositories (`tala-io/taladb-kotlin`, `tala-io/taladb-swift`) and consume prebuilt libraries from the GitHub release, so the C interface now carries an explicit version.

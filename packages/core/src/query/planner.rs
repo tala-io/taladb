@@ -448,7 +448,7 @@ fn f64_next_up(f: f64) -> f64 {
 }
 
 /// Scan an `And`'s direct sub-filters for a lower **and** upper bound on the
-/// same indexed field and, if found, plan it as one bounded range.
+/// same indexed field and, if found, intersect their matching IDs.
 fn bounded_range_from_and(filters: &[Filter], indexed_fields: &[&str]) -> Option<QueryPlan> {
     for field in indexed_fields {
         let mut lower: Option<(&Value, bool)> = None;

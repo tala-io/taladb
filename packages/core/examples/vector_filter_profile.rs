@@ -11,7 +11,12 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(2000);
     let dimensions = 128;
-    let queries = 20;
+    let args: Vec<_> = std::env::args().collect();
+    let queries = args
+        .iter()
+        .position(|arg| arg == "--queries")
+        .map_or(20, |i| args[i + 1].parse::<usize>().unwrap());
+    assert!(count >= 10 && queries > 0);
     let db = Database::open_in_memory().unwrap();
     let col = db.collection("docs").unwrap();
     let mut rng = 1234567u64;
@@ -138,7 +143,7 @@ fn main() {
     }
     println!(
         "{}",
-        serde_json::json!({ "count": count, "dimensions": dimensions,
+        serde_json::json!({ "schema": 1, "count": count, "dimensions": dimensions,
         "queries": queries, "body_bytes": 8192, "cases": reports })
     );
 }

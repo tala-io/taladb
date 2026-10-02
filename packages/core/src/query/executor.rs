@@ -46,12 +46,10 @@ pub(crate) fn matching_ids(
     compounds: &[CompoundIndexDef],
 ) -> Result<HashSet<[u8; 16]>, TalaDbError> {
     let matcher = Matcher::new(filter)?;
-    let covered = super::index_filter::resolve(filter, indexes, compounds, txn, collection)?;
-    if let Some(covered) = &covered
-        && covered.exact
-    {
-        return Ok(covered.ids.clone());
-    }
+    let covered = match super::index_filter::resolve(filter, indexes, compounds, txn, collection)? {
+        Some(covered) if covered.exact => return Ok(covered.ids),
+        covered => covered,
+    };
     let mut ids = HashSet::new();
     let fields = super::filter_document::fields(filter);
     let table = docs_table_name(collection);
@@ -531,6 +529,27 @@ fn collect_ulids(
                 Bound::Included(end.as_slice()),
             )?;
             Ok(ulids.into_iter().map(|u| u.to_bytes()).collect())
+        }
+        QueryPlan::IndexOr { plans } => {
+            let mut ids = HashSet::new();
+            for plan in plans {
+                ids.extend(collect_ulids(plan, txn, collection, deadline)?);
+            }
+            Ok(ids.into_iter().collect())
+        }
+        QueryPlan::IndexAnd { plans } => {
+            let mut ids: Option<HashSet<[u8; 16]>> = None;
+            for plan in plans {
+                let next: HashSet<_> = collect_ulids(plan, txn, collection, deadline)?
+                    .into_iter()
+                    .collect();
+                if let Some(current) = &mut ids {
+                    current.retain(|id| next.contains(id));
+                } else {
+                    ids = Some(next);
+                }
+            }
+            Ok(ids.unwrap_or_default().into_iter().collect())
         }
         _ => {
             // For non-index plans, fall back to executing and extracting ids

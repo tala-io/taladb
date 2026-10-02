@@ -1379,13 +1379,58 @@ impl Collection {
                 best.push(Reverse(candidate));
             }
         };
-        // Selective filters read only their vector IDs and never populate the full cache.
+        // Sparse filters batch point reads in key order. Dense filters use an
+        // existing decoded block or one contiguous scan, decoding only matches.
+        // Filtered reads never populate the full-vector cache.
         if let Some(ids) = allowed {
-            for id in ids {
-                if let Some(bytes) = txn.get(&table, &id)?
-                    && let Some(values) = decode_f32_vec(&bytes)
-                {
-                    score(Ulid::from_bytes(id), &values);
+            let count = usize::try_from(txn.count_entries(&table)?).unwrap_or(usize::MAX);
+            if ids.len() <= count / 8 {
+                let mut keys: Vec<_> = ids.into_iter().collect();
+                keys.sort_unstable();
+                // Bound batched copies by roughly 64 KiB, except when one
+                // vector alone is larger. Table opens amortise across the batch.
+                let chunk_size = (64 * 1024 / def.dimensions.saturating_mul(4)).clamp(1, 256);
+                for chunk in keys.chunks(chunk_size) {
+                    let refs: Vec<_> = chunk.iter().map(<[u8; 16]>::as_slice).collect();
+                    for (id, bytes) in chunk.iter().zip(txn.get_many(&table, &refs)?) {
+                        if let Some(bytes) = bytes
+                            && let Some(values) = decode_f32_vec(&bytes)
+                        {
+                            score(Ulid::from_bytes(*id), &values);
+                        }
+                    }
+                }
+            } else {
+                let cached = self
+                    .search_cache
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .vectors(&cache_key, generation);
+                if let Some(block) = cached {
+                    for (id, values) in block
+                        .ids
+                        .iter()
+                        .zip(block.values.chunks_exact(block.dimensions))
+                    {
+                        if ids.contains(&id.to_bytes()) {
+                            score(*id, values);
+                        }
+                    }
+                } else {
+                    txn.scan(
+                        &table,
+                        std::ops::Bound::Unbounded,
+                        std::ops::Bound::Unbounded,
+                        &mut |key, bytes| {
+                            if let Ok(id) = <[u8; 16]>::try_from(key)
+                                && ids.contains(&id)
+                                && let Some(values) = decode_f32_vec(bytes)
+                            {
+                                score(Ulid::from_bytes(id), &values);
+                            }
+                            Ok(crate::engine::ScanFlow::Continue)
+                        },
+                    )?;
                 }
             }
         } else {

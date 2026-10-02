@@ -94,6 +94,21 @@ jobs:
           python scripts/vector-bench-ci.py "$RUNNER_TEMP/vector-baseline" "$GITHUB_WORKSPACE" \
             --count "$count" --repeats "$repeats" --quantization "$BENCH_QUANTIZATION" \
             --batch-size 128 --output vector-benchmark-staged.json
+      - name: Compare filtered workloads
+        if: matrix.quantization == 'none'
+        env:
+          BENCH_EVENT: ${{ github.event_name }}
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+        run: |
+          count=2000
+          repeats=3
+          if [ "$BENCH_EVENT" != pull_request ]; then
+            count=10000
+            repeats=1
+          fi
+          python scripts/vector-bench-ci.py "$RUNNER_TEMP/vector-baseline" "$GITHUB_WORKSPACE" \
+            --workload filtered --count "$count" --repeats "$repeats" --queries 20 \
+            --output vector-benchmark-filtered.json
       - name: Publish benchmark history
         if: always()
         uses: actions/upload-artifact@v4
@@ -102,4 +117,5 @@ jobs:
           path: |
             vector-benchmark.json
             vector-benchmark-staged.json
+            vector-benchmark-filtered.json
           retention-days: 90

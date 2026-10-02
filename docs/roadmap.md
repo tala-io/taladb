@@ -45,8 +45,9 @@ JavaScript runtime.
 - **Better approximate-search recall at scale** — improve candidate selection
   and graph connectivity, validated against exact search on larger collections
   and representative embedding datasets.
-- **Index-covered vector filters** — evaluate covered predicates from index
-  keys and choose between selective vector lookups and contiguous scans.
+- **Cost-aware filter planning** — use selectivity estimates and metadata about
+  array-valued fields to choose cheaper index intersections and narrower scalar
+  range scans while preserving array matching semantics.
 - **Lower graph traversal cost** — leaner cached nodes and reusable traversal
   buffers, so larger graphs stay resident in memory.
 - **Bounded search working memory** — account for active cache loans and
