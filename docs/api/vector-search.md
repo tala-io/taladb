@@ -120,6 +120,11 @@ use binary codes. This preserves query component magnitudes during candidate
 selection; exact rescoring then ranks the candidates using their original
 vectors. Existing binary graphs use this search behavior without a rebuild.
 
+Binary graph construction compares packed sign codes directly during neighbour
+selection and link pruning, avoiding repeated expansion into float vectors.
+This applies to initial builds, resumable rebuilds and graph updates on writes.
+It preserves similarity scores and the stored graph format.
+
 ## Search controls and execution details
 
 ```ts

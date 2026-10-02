@@ -45,8 +45,6 @@ JavaScript runtime.
 - **Better approximate-search recall at scale** — improve candidate selection
   and graph connectivity, validated against exact search on larger collections
   and representative embedding datasets.
-- **Faster binary index builds** — compare packed codes during construction
-  instead of repeatedly decoding them into floating-point vectors.
 - **Index-covered vector filters** — evaluate covered predicates from index
   keys and choose between selective vector lookups and contiguous scans.
 - **Lower graph traversal cost** — leaner cached nodes and reusable traversal

@@ -70,9 +70,9 @@ jobs:
           python scripts/vector-bench-ci.py "$RUNNER_TEMP/vector-baseline" "$GITHUB_WORKSPACE" \
             --count "$count" --repeats "$repeats" --quantization "$BENCH_QUANTIZATION" --output vector-benchmark.json
       - name: Compare resumable builds
-        if: matrix.quantization == 'none'
         env:
           BENCH_EVENT: ${{ github.event_name }}
+          BENCH_QUANTIZATION: ${{ matrix.quantization }}
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
         run: |
           count=2000
@@ -82,7 +82,8 @@ jobs:
             repeats=1
           fi
           python scripts/vector-bench-ci.py "$RUNNER_TEMP/vector-baseline" "$GITHUB_WORKSPACE" \
-            --count "$count" --repeats "$repeats" --batch-size 128 --output vector-benchmark-staged.json
+            --count "$count" --repeats "$repeats" --quantization "$BENCH_QUANTIZATION" \
+            --batch-size 128 --output vector-benchmark-staged.json
       - name: Publish benchmark history
         if: always()
         uses: actions/upload-artifact@v4

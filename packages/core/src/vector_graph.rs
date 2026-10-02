@@ -174,15 +174,15 @@ impl Code {
     }
     /// Borrow the stored vector where possible.
     ///
-    /// This is on the hottest path in the crate: every distance computation in
-    /// both search and construction calls it once. `Quantization::None` is the
+    /// Full-precision search and non-binary construction use this on every
+    /// distance computation. `Quantization::None` is the
     /// default, and its vector is already `Vec<f32>` in exactly the layout the
     /// scorer wants — so returning `Vec<f32>` meant cloning 384 floats
     /// (~1.5 KB, a heap allocation plus a memcpy) per distance, purely to hand
     /// out a `&[f32]` that the caller drops immediately.
     ///
-    /// The quantized variants genuinely have to reconstruct, so they still
-    /// allocate. `Cow` lets the common case cost nothing without giving that up.
+    /// Quantized codes still reconstruct for comparisons with float queries.
+    /// Binary-to-binary construction uses packed comparisons instead.
     fn decode(&self, dimensions: usize) -> Cow<'_, [f32]> {
         match self {
             Self::Float(v) => Cow::Borrowed(v),
@@ -214,6 +214,108 @@ impl Code {
             Self::Binary(v) => v.len() == d.div_ceil(8),
         }
     }
+    fn norm_sq(&self, dimensions: usize) -> f32 {
+        match self {
+            Self::Binary(_) if dimensions <= MAX_EXACT_BINARY_DIMENSIONS => dimensions as f32,
+            _ => norm_sq(&self.decode(dimensions)),
+        }
+    }
+}
+
+// Above this length, sequential f32 norm accumulation can round differently.
+// Keep the decoded scorer for those unusual vectors to preserve graph ordering.
+const MAX_EXACT_BINARY_DIMENSIONS: usize = 1 << 24;
+
+enum QueryValues<'a> {
+    Float(Cow<'a, [f32]>),
+    Binary(Cow<'a, [u8]>),
+}
+struct Query<'a> {
+    values: QueryValues<'a>,
+    norm: f32,
+}
+impl<'a> Query<'a> {
+    fn float(values: &'a [f32]) -> Self {
+        Self {
+            values: QueryValues::Float(Cow::Borrowed(values)),
+            norm: l2_norm(values),
+        }
+    }
+    fn code(code: &'a Code, dimensions: usize) -> Self {
+        if let Code::Binary(bits) = code
+            && dimensions <= MAX_EXACT_BINARY_DIMENSIONS
+        {
+            Self {
+                values: QueryValues::Binary(Cow::Borrowed(bits)),
+                norm: (dimensions as f32).sqrt(),
+            }
+        } else {
+            let values = code.decode(dimensions);
+            let norm = l2_norm(&values);
+            Self {
+                values: QueryValues::Float(values),
+                norm,
+            }
+        }
+    }
+    fn into_owned(self) -> Query<'static> {
+        Query {
+            values: match self.values {
+                QueryValues::Float(v) => QueryValues::Float(Cow::Owned(v.into_owned())),
+                QueryValues::Binary(v) => QueryValues::Binary(Cow::Owned(v.into_owned())),
+            },
+            norm: self.norm,
+        }
+    }
+    fn score(&self, code: &Code, stored_norm_sq: f32, h: &Header) -> f32 {
+        match (&self.values, code) {
+            (QueryValues::Binary(a), Code::Binary(b)) if h.metric == VectorMetric::Cosine => {
+                let dot = binary_dot(a, b, h.dimensions);
+                if self.norm == 0.0 {
+                    0.0
+                } else {
+                    // Preserve the decoded scorer's rounding, rather than dot / d.
+                    dot / (self.norm * stored_norm_sq.sqrt())
+                }
+            }
+            (QueryValues::Float(q), _) => score_with_norms(
+                &h.metric,
+                q,
+                self.norm,
+                &code.decode(h.dimensions),
+                stored_norm_sq,
+            ),
+            // The node decoder accepts mixed code types; preserve its scoring
+            // behavior rather than assuming every stored code is binary.
+            (QueryValues::Binary(q), _) => score_with_norms(
+                &h.metric,
+                &Code::Binary(q.to_vec()).decode(h.dimensions),
+                self.norm,
+                &code.decode(h.dimensions),
+                stored_norm_sq,
+            ),
+        }
+    }
+}
+
+/// Dot product of sign vectors without expanding their packed representation.
+/// Padding bits are outside the vector, including nonzero padding from storage.
+fn binary_dot(a: &[u8], b: &[u8], dimensions: usize) -> f32 {
+    let bytes = dimensions / 8;
+    let (a_words, a_rest) = a[..bytes].as_chunks::<8>();
+    let (b_words, b_rest) = b[..bytes].as_chunks::<8>();
+    let mut mismatches = 0usize;
+    for (&x, &y) in a_words.iter().zip(b_words) {
+        mismatches += (u64::from_le_bytes(x) ^ u64::from_le_bytes(y)).count_ones() as usize;
+    }
+    for (&x, &y) in a_rest.iter().zip(b_rest) {
+        mismatches += (x ^ y).count_ones() as usize;
+    }
+    let tail = dimensions % 8;
+    if tail != 0 {
+        mismatches += ((a[bytes] ^ b[bytes]) & ((1 << tail) - 1)).count_ones() as usize;
+    }
+    dimensions as f32 - 2.0 * mismatches as f32
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Node {
@@ -369,7 +471,7 @@ impl NodeCache {
         }
         let norm = replacing
             .as_ref()
-            .map_or_else(|| norm_sq(&node.code.decode(dimensions)), |old| old.norm_sq);
+            .map_or_else(|| node.code.norm_sq(dimensions), |old| old.norm_sq);
         self.nodes.insert(
             id,
             Cached {
@@ -505,20 +607,13 @@ impl<'a> Reader<'a> {
     fn node(&mut self, id: u64) -> Result<&Node, TalaDbError> {
         Ok(&self.cached(id)?.node)
     }
-    fn distance_with_norm(
-        &mut self,
-        query: &[f32],
-        query_norm: f32,
-        id: u64,
-    ) -> Result<Hit, TalaDbError> {
-        let dimensions = self.h.dimensions;
-        let metric = self.h.metric;
+    fn distance(&mut self, query: &Query<'_>, id: u64) -> Result<Hit, TalaDbError> {
+        let h = self.h;
         // Scoped so the borrow of `self.nodes` ends before `self.distances` is
         // touched: with a borrowed `Cow` the vector points into the cached node.
         let score = {
             let cached = self.cached(id)?;
-            let v = cached.node.code.decode(dimensions);
-            score_with_norms(&metric, query, query_norm, &v, cached.norm_sq)
+            query.score(&cached.node.code, cached.norm_sq, h)
         };
         self.distances += 1;
         if !score.is_finite() {
@@ -528,12 +623,8 @@ impl<'a> Reader<'a> {
         }
         Ok(Hit(-score, id))
     }
-    fn distance(&mut self, query: &[f32], id: u64) -> Result<Hit, TalaDbError> {
-        self.distance_with_norm(query, l2_norm(query), id)
-    }
-    fn greedy(&mut self, q: &[f32], entry: u64, layer: usize) -> Result<u64, TalaDbError> {
-        let query_norm = l2_norm(q);
-        let mut best = self.distance_with_norm(q, query_norm, entry)?;
+    fn greedy(&mut self, q: &Query<'_>, entry: u64, layer: usize) -> Result<u64, TalaDbError> {
+        let mut best = self.distance(q, entry)?;
         loop {
             let before = best;
             let links = self
@@ -543,7 +634,7 @@ impl<'a> Reader<'a> {
                 .cloned()
                 .unwrap_or_default();
             for id in links {
-                let h = self.distance_with_norm(q, query_norm, id)?;
+                let h = self.distance(q, id)?;
                 if h < best {
                     best = h;
                 }
@@ -558,19 +649,18 @@ impl<'a> Reader<'a> {
     // not strand traversal at a rejected node. ANN remains approximate.
     fn layer(
         &mut self,
-        q: &[f32],
+        q: &Query<'_>,
         entries: &[u64],
         layer: usize,
         ef: usize,
         allowed: Option<&HashSet<[u8; 16]>>,
         live_only: bool,
     ) -> Result<Vec<Hit>, TalaDbError> {
-        let query_norm = l2_norm(q);
         let mut visited = HashSet::new();
         let mut queue = BinaryHeap::new();
         let mut best = BinaryHeap::new();
         for &id in entries {
-            let hit = self.distance_with_norm(q, query_norm, id)?;
+            let hit = self.distance(q, id)?;
             visited.insert(id);
             queue.push(Reverse(hit));
             let n = self.node(id)?;
@@ -592,7 +682,7 @@ impl<'a> Reader<'a> {
                 if !visited.insert(id) {
                     continue;
                 }
-                let next = self.distance_with_norm(q, query_norm, id)?;
+                let next = self.distance(q, id)?;
                 if best.len() < ef || best.peek().is_some_and(|worst| next < *worst) {
                     queue.push(Reverse(next));
                     let n = self.node(id)?;
@@ -613,15 +703,12 @@ impl<'a> Reader<'a> {
         for hit in candidates {
             let dimensions = self.h.dimensions;
             // Owned: `point` is held across `self.distance`, which reborrows mutably.
-            let point = self.node(hit.1)?.code.decode(dimensions).into_owned();
-            // `point` does not change across the inner loop, so its norm is
-            // loop-invariant. `distance` recomputes it per comparison, which put
-            // a whole extra pass over the vector inside the diversity check —
-            // 15.9% of construction time lived in this function.
-            let point_norm = l2_norm(&point);
+            let point = Query::code(&self.node(hit.1)?.code, dimensions).into_owned();
+            // The prepared point keeps its norm across comparisons, and binary
+            // points retain only their packed code during the diversity check.
             let mut diverse = true;
             for &other in &selected {
-                if self.distance_with_norm(&point, point_norm, other)?.0 < hit.0 {
+                if self.distance(&point, other)?.0 < hit.0 {
                     diverse = false;
                     break;
                 }
@@ -719,14 +806,13 @@ pub(crate) fn insert_cached(
         rng /= u64::from(h.options.m);
     }
     let code = Code::encode(values, h.options.quantization);
-    // Owned: `code` is moved into the node below.
-    let query = code.decode(h.dimensions).into_owned();
     let mut node = Node {
         doc,
         code,
         links: vec![vec![]; level + 1],
         deleted: false,
     };
+    let query = Query::code(&node.code, h.dimensions);
     if let Some(mut entry) = h.entry {
         // One cache for the whole insert: the descent below and the back-linking
         // pass further down both traverse the same neighbourhood, so the second
@@ -802,8 +888,7 @@ pub(crate) fn insert_cached(
                     n.links[layer].push(id);
                     let limit = h.options.m as usize * if layer == 0 { 2 } else { 1 };
                     if n.links[layer].len() > limit {
-                        // Owned: `n.links` is reassigned while this is still live.
-                        let q = n.code.decode(h.dimensions).into_owned();
+                        let q = Query::code(&n.code, h.dimensions);
                         let mut candidates = n.links[layer]
                             .iter()
                             .map(|&v| reader.distance(&q, v))
@@ -862,15 +947,118 @@ pub(crate) fn search(
     // rescoring sees it. Comparing the original query with decoded codes also
     // works with existing binary graphs; the stored format is unchanged.
     let mut reader = Reader::new(txn, h, cache);
+    let query = Query::float(query);
     for layer in (1..=h.level).rev() {
-        entry = reader.greedy(query, entry, layer)?;
+        entry = reader.greedy(&query, entry, layer)?;
     }
-    let hits = reader.layer(query, &[entry], 0, ef.max(1), allowed, true)?;
+    let hits = reader.layer(&query, &[entry], 0, ef.max(1), allowed, true)?;
     let ids = hits
         .iter()
         .map(|h| reader.node(h.1).map(|n| n.doc))
         .collect::<Result<Vec<_>, _>>()?;
     Ok((ids, reader.distances))
+}
+
+#[cfg(test)]
+mod binary_tests {
+    use super::*;
+
+    #[test]
+    fn packed_dot_matches_every_byte_pair_and_ignores_padding() {
+        for dimensions in 1..=8 {
+            for a in 0..=u8::MAX {
+                for b in 0..=u8::MAX {
+                    let expected: f32 = (0..dimensions)
+                        .map(|i| if (a ^ b) & (1 << i) == 0 { 1.0 } else { -1.0 })
+                        .sum();
+                    assert_eq!(
+                        binary_dot(&[a], &[b], dimensions).to_bits(),
+                        expected.to_bits()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn packed_cosine_preserves_decoded_scores_and_float_query_magnitudes() {
+        let mut rng = 12345u64;
+        for dimensions in [
+            0usize, 1, 7, 8, 9, 63, 64, 65, 127, 128, 129, 384, 1536, 8193,
+        ] {
+            let h = Header::new(
+                "test".into(),
+                0,
+                GraphOptions {
+                    quantization: Quantization::Binary,
+                    ..Default::default()
+                },
+                dimensions,
+                VectorMetric::Cosine,
+            );
+            for sample in 0..32 {
+                let mut bytes = || {
+                    (0..dimensions.div_ceil(8))
+                        .map(|_| {
+                            rng ^= rng << 13;
+                            rng ^= rng >> 7;
+                            rng ^= rng << 17;
+                            rng.to_le_bytes()[0]
+                        })
+                        .collect::<Vec<_>>()
+                };
+                let a = Code::Binary(bytes());
+                let b = if sample == 0 {
+                    a.clone()
+                } else if sample == 1 {
+                    let Code::Binary(v) = &a else { unreachable!() };
+                    Code::Binary(v.iter().map(|x| !x).collect())
+                } else {
+                    Code::Binary(bytes())
+                };
+                let decoded_a = a.decode(dimensions);
+                let decoded_b = b.decode(dimensions);
+                let expected_norm = norm_sq(&decoded_b);
+                assert_eq!(b.norm_sq(dimensions).to_bits(), expected_norm.to_bits());
+                let expected = score_with_norms(
+                    &h.metric,
+                    &decoded_a,
+                    l2_norm(&decoded_a),
+                    &decoded_b,
+                    expected_norm,
+                );
+                let prepared = Query::code(&a, dimensions).into_owned();
+                assert_eq!(
+                    prepared.score(&b, b.norm_sq(dimensions), &h).to_bits(),
+                    expected.to_bits()
+                );
+                // The fallback handles mixed record codes without changing scores.
+                let float_b = Code::Float(decoded_b.to_vec());
+                assert_eq!(
+                    prepared.score(&float_b, expected_norm, &h).to_bits(),
+                    expected.to_bits()
+                );
+                let float_query: Vec<_> = decoded_a
+                    .iter()
+                    .enumerate()
+                    .map(|(i, x)| *x * (i % 7) as f32)
+                    .collect();
+                let expected = score_with_norms(
+                    &h.metric,
+                    &float_query,
+                    l2_norm(&float_query),
+                    &decoded_b,
+                    expected_norm,
+                );
+                assert_eq!(
+                    Query::float(&float_query)
+                        .score(&b, expected_norm, &h)
+                        .to_bits(),
+                    expected.to_bits()
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]

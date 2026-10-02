@@ -13,6 +13,8 @@
 
 - Reused decoded HNSW nodes across resumable build steps within the shared cache budget. Only committed edits are retained; failed transactions, cancellation and publication discard the partial-build cache. Native CI now compares resumable build performance, with separate Cargo artifacts for baseline and candidate checkouts.
 
+- Removed repeated sign-to-float expansion from binary HNSW construction by comparing packed codes directly. Similarity scores and the stored format are unchanged; searches retain full-precision queries and exact rescoring. CI now measures both synchronous and resumable binary builds.
+
 ## 0.11.9 — 2026-10-02
 
 Groundwork for first-party Kotlin and Swift packages that wrap the C FFI directly, without React Native. Those packages live in their own repositories (`tala-io/taladb-kotlin`, `tala-io/taladb-swift`) and consume prebuilt libraries from the GitHub release, so the C interface now carries an explicit version.
