@@ -115,6 +115,11 @@ await articles.createVectorIndex('embedding', {
 
 HNSW supports cosine and euclidean metrics. Dot product remains available through exact indexes. Binary quantization requires cosine; its quality depends strongly on the embedding model. Scalar and binary codes reduce the graph's vector payload by approximately 4× and 32× respectively, excluding headers and edges. Original vectors stay in the database for exact rescoring, so these are not total storage or RAM reduction guarantees.
 
+Search traversal keeps the query at full precision, including when stored nodes
+use binary codes. This preserves query component magnitudes during candidate
+selection; exact rescoring then ranks the candidates using their original
+vectors. Existing binary graphs use this search behavior without a rebuild.
+
 ## Search controls and execution details
 
 ```ts
@@ -158,6 +163,13 @@ await articles.rebuildVectorIndex('embedding', {
 Rebuilding compacts tombstones and can change graph settings or promote a flat index. Batches run off the JS thread on Node and React Native, and in the browser worker. Cancellation is cooperative between batches (1–1024 vectors; default 32), not an interruption of an individual insertion. Rebuilds keep the active graph available and publish the replacement atomically. Embedding mutations during a rebuild cause it to fail instead of publishing stale data; retry when ingestion is idle. Metadata-only changes are allowed.
 
 For explicit resume after a process restart, use `beginVectorBuild(field, options)`, `stepVectorBuild(field, buildId, batchSize)` and `cancelVectorBuild(field, buildId)`. The status response includes the build ID and progress. Only one staged build per field may run at a time. Cancellation preserves the active graph; the storage compactor can reclaim freed pages later.
+
+Build steps reuse decoded graph nodes within the database's shared retained
+cache budget. Reuse is best effort: eviction or a process restart reloads nodes
+from storage without losing committed progress. A zero cache budget disables
+retention. Failed transactions discard their cached edits; cancelled or failed
+builds release their partial graph cache. Batch size limits the number of
+insertions per step, but does not impose a fixed time or process memory limit.
 
 `upgradeVectorIndex(field)` now promotes flat/legacy indexes and rebuilds existing HNSW graphs. `dropVectorIndex(field)` removes both flat and graph records while retaining documents. Old HNSW metadata opens in `rebuildRequired` state and exact search remains available until promotion/rebuild.
 
