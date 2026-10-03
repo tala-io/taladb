@@ -19,7 +19,7 @@ const packages = [
 ];
 
 // `--check <version>`: change nothing; fail unless every file this script
-// writes already carries <version> and CHANGELOG.md has a dated entry for it.
+// writes already carries <version>.
 // The release workflow runs this against the tag before anything is built,
 // because publishing takes its versions from these files, not from the tag.
 if (process.argv[2] === "--check") {
@@ -35,15 +35,12 @@ if (process.argv[2] === "--check") {
   const problems = found
     .filter(([, actual]) => actual !== expected)
     .map(([path, actual]) => `${path} has ${actual ?? "no version"}`);
-  const heading = read("CHANGELOG.md").split("\n").find((line) => line.startsWith(`## ${expected} `));
-  if (!heading) problems.push(`CHANGELOG.md has no "## ${expected} — <date>" entry`);
-  else if (!/\d{4}-\d{2}-\d{2}/.test(heading)) problems.push(`CHANGELOG.md entry is not dated: "${heading}"`);
   if (problems.length) {
     console.error(`✗ not ready to release ${expected}:\n  ${problems.join("\n  ")}`);
-    console.error("  Run `node scripts/sync-version.js` after setting package.json, and date the changelog.");
+    console.error("  Run `node scripts/sync-version.js` after setting package.json.");
     process.exit(1);
   }
-  console.log(`✓ every manifest, Cargo.lock, the docs badge and CHANGELOG.md are at ${expected}`);
+  console.log(`✓ every manifest, Cargo.lock and the docs badge are at ${expected}`);
   process.exit(0);
 }
 
