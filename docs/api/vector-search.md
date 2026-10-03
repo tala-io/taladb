@@ -194,8 +194,9 @@ Measurement compares ANN with exact top-k using the same database snapshot. Use 
 
 ## Search memory budget
 
-Exact vectors and decoded graph nodes share one retained cache budget per
-database: 8 MiB on Android, iOS and WASM; 64 MiB on other native targets.
+Exact vectors, decoded graph nodes and active ANN traversal buffers share one
+estimated memory allowance per database: 8 MiB on Android, iOS and WASM;
+64 MiB on other native targets.
 Configure a budget for your application's available memory when opening Node
 or browser databases:
 
@@ -208,14 +209,28 @@ const db = await openDB('articles', {
 React Native accepts the same field in its initialization config JSON. C FFI
 callers can pass it to `taladb_open_with_config`. Rust applications can call
 `db.set_vector_cache_budget(bytes)` and inspect `db.vector_cache_stats()`.
-Zero disables retention. Existing collection handles observe budget changes.
+Zero disables retention. A shared 64 KiB minimum workspace still supports short
+ANN walks when the configured budget is smaller. Existing collection handles
+observe budget changes; active loans finish under their original allowance.
+Reducing the budget prevents new admissions until those loans return.
 
-This budget covers estimated retained vector and graph allocations across all
-indexed fields. Active queries, concurrent cache loans, rebuild scratch space,
-and storage-engine caches use additional memory. It is not a process RAM limit.
-Cache eviction affects performance, not query results. Device memory is not
-automatically detected; provide an application budget when the default is too
-large or too small.
+Retained caches, pinned exact-vector blocks, full-vector cache construction and
+concurrent graph loans share this allowance. ANN uses a compact visited bitset
+and checks buffer growth before allocating. If a walk cannot fit, even when
+`mode: 'ann'` was requested, search switches to exact on the same snapshot.
+`execution.path` is `'exact'` and `execution.reason` is `'memoryBudget'`. Filters,
+thresholds, grouping and pagination still apply; exact ranking can differ from
+approximate ranking, and the fallback can take longer.
+
+Rust cache statistics, also available through the binding command
+`{ op: 'cacheStats' }`, include `retainedBytes`, `activeBytes`,
+`memoryBudgetBytes` and `peakBytes` in JSON. Active and peak bytes conservatively
+charge the full reservation of a graph loan or vector-cache builder. They are
+accounting estimates, not measured heap use or RSS. Peak resets when the budget
+is set. Filter ID sets, ranked results and documents, transient single-record
+decoding, rebuild scratch and storage-engine caches use additional memory.
+Device memory is not automatically detected; provide an application budget
+when the default is too large or too small.
 
 ## Pairing with on-device embedding models
 

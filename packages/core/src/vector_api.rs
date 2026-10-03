@@ -13,6 +13,7 @@ use serde_json::{Value as Json, json};
     deny_unknown_fields
 )]
 enum Command {
+    CacheStats,
     Create {
         field: String,
         dimensions: usize,
@@ -145,6 +146,12 @@ impl Collection {
                 .transpose()
         };
         Ok(match command {
+            Command::CacheStats => json!(
+                self.node_cache()
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .stats()
+            ),
             Command::Create {
                 field,
                 dimensions,
@@ -761,17 +768,36 @@ impl Collection {
             // One cache for the whole retry sequence — see `graph::search` — and
             // now for the whole process: the lease takes it out of the shared
             // map and returns it on every exit path, including the error ones.
-            // Taking it out rather than holding the lock keeps concurrent
-            // queries from serialising on one graph; the worst case is two
-            // queries both decoding and the last one winning, which is a cache
-            // miss, not a wrong answer.
+            // Active loans reserve shared memory without holding the mutex.
+            // A concurrent walk without enough space uses exact search instead
+            // of allocating a second full graph cache.
             //
             // The unique table identity pins the loan to this graph generation;
             // revision additionally pins it to the vectors in this snapshot.
             let mut lease = graph::CacheLease::take(self.node_cache(), &h.table, h.revision);
             loop {
                 let (ids, distances) =
-                    graph::search(txn, h, query, ef, allowed.as_ref(), lease.cache_mut())?;
+                    match graph::search(txn, h, query, ef, allowed.as_ref(), lease.cache_mut()) {
+                        Ok(result) => result,
+                        Err(TalaDbError::SearchMemoryLimit) => {
+                            // Release all traversal allocations before the fallback.
+                            drop(lease);
+                            drop(allowed);
+                            let mut exact_options = options.clone();
+                            exact_options.mode = VectorSearchMode::Exact;
+                            let mut result = self.search_vectors_in(
+                                txn,
+                                field,
+                                query,
+                                top_k,
+                                filter,
+                                &exact_options,
+                            )?;
+                            result.execution.reason = "memoryBudget".into();
+                            return Ok(result);
+                        }
+                        Err(error) => return Err(error),
+                    };
                 execution.distance_computations += distances;
                 execution.ef_search = Some(ef);
                 // Exact rescoring always reads the original f32 vector from the

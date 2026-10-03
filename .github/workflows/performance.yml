@@ -113,6 +113,13 @@ jobs:
           python scripts/vector-bench-ci.py "$RUNNER_TEMP/vector-baseline" "$GITHUB_WORKSPACE" \
             --workload filtered --count "$count" --repeats "$repeats" --queries 20 \
             --output vector-benchmark-filtered.json
+      - name: Check concurrent search memory at phone budgets
+        if: matrix.quantization == 'none'
+        run: |
+          for budget in 1048576 8388608; do
+            cargo run --locked --release -p taladb --example vector_memory_profile -- \
+              --cache-bytes "$budget" --count 2000 --queries 20 > "vector-memory-$budget.json"
+          done
       - name: Publish benchmark history
         if: always()
         uses: actions/upload-artifact@v4
@@ -122,6 +129,7 @@ jobs:
             vector-benchmark.json
             vector-benchmark-staged.json
             vector-benchmark-filtered.json
+            vector-memory-*.json
           retention-days: 90
 
   browser:

@@ -31,7 +31,8 @@ export interface DurabilityConfig {
 
 /** Top-level TalaDB configuration. */
 export interface TalaDbConfig {
-  /** Shared retained vector/graph cache budget in bytes; zero disables caching. */
+  /** Shared decoded search allowance in bytes, including active ANN scratch.
+   * Zero disables retention; short walks share a 64 KiB workspace. */
   vector_cache_bytes?: number;
   /** Outbound change-webhook configuration. Disabled by default. */
   webhook?: WebhookConfig;

@@ -271,9 +271,13 @@ impl Database {
         Ok(db)
     }
 
-    /// Set the shared byte budget for retained exact-vector and graph caches.
-    /// Zero disables retention. Active queries and builds may use scratch space
-    /// beyond this budget; this is not a limit on process or storage-engine RAM.
+    /// Set the shared decoded search-memory budget across retained caches,
+    /// active graph loans, vector-block construction and ANN traversal scratch.
+    /// Zero disables retention; a shared 64 KiB minimum workspace allows short
+    /// ANN walks. Walks that cannot fit fall back to exact on the same snapshot.
+    /// Existing loans finish under their original allowance after a reduction.
+    /// Filters, results, single-record decoding, build scratch and storage-engine
+    /// caches are separate; this is not a limit on process RAM.
     pub fn set_vector_cache_budget(&self, bytes: usize) {
         self.search_cache
             .lock()

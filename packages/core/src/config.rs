@@ -70,7 +70,8 @@ pub struct TalaDbConfig {
     /// Storage durability configuration.
     #[serde(default)]
     pub durability: DurabilityConfig,
-    /// Shared retained exact-vector and HNSW cache budget. Zero disables caching.
+    /// Shared decoded search-memory allowance, including active ANN scratch.
+    /// Zero disables retention; short ANN walks share a 64 KiB workspace.
     #[serde(default)]
     pub vector_cache_bytes: Option<usize>,
 }

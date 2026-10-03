@@ -48,8 +48,9 @@ JavaScript runtime.
 - **Cost-aware filter planning** — use selectivity estimates and metadata about
   array-valued fields to choose cheaper index intersections and narrower scalar
   range scans while preserving array matching semantics.
-- **Bounded search working memory** — account for active cache loans and
-  concurrent query scratch space alongside the retained cache budget.
+- **Streaming filtered and grouped search** — reduce memory used by large
+  filter ID sets and grouped result pools, beyond the shared decoded-cache and
+  ANN traversal allowance.
 - **Adaptive cache sizing** — adapt the shared, configurable vector/graph
   budget to platform memory-pressure signals.
 - **Wider native SIMD** — a runtime-detected AVX2/NEON kernel on top of the
