@@ -67,6 +67,22 @@ pub trait WriteTxn {
         start: Bound<&[u8]>,
         end: Bound<&[u8]>,
     ) -> Result<KvPairs, TalaDbError>;
+    /// Stream the writer's snapshot. Native backends override this to avoid
+    /// allocating a whole range before a bounded build batch can stop.
+    fn scan(
+        &self,
+        table: &str,
+        start: Bound<&[u8]>,
+        end: Bound<&[u8]>,
+        f: ScanFn<'_>,
+    ) -> Result<(), TalaDbError> {
+        for (k, v) in self.range(table, start, end)? {
+            if f(&k, &v)? == ScanFlow::Stop {
+                break;
+            }
+        }
+        Ok(())
+    }
     fn commit(self: Box<Self>) -> Result<(), TalaDbError>;
 
     /// Names of every table in the database, as seen from inside this write
@@ -171,6 +187,15 @@ impl ReadTxn for WriteView<'_> {
         end: Bound<&[u8]>,
     ) -> Result<KvPairs, TalaDbError> {
         self.0.range(table, start, end)
+    }
+    fn scan(
+        &self,
+        table: &str,
+        start: Bound<&[u8]>,
+        end: Bound<&[u8]>,
+        f: ScanFn<'_>,
+    ) -> Result<(), TalaDbError> {
+        self.0.scan(table, start, end, f)
     }
     fn scan_all(&self, table: &str) -> Result<KvPairs, TalaDbError> {
         self.0.range(table, Bound::Unbounded, Bound::Unbounded)
@@ -483,6 +508,26 @@ impl WriteTxn for RedbWriteTxn {
         }
     }
 
+    fn scan(
+        &self,
+        table: &str,
+        start: Bound<&[u8]>,
+        end: Bound<&[u8]>,
+        f: ScanFn<'_>,
+    ) -> Result<(), TalaDbError> {
+        let tbl = match self.txn.open_table(table_def(table)?) {
+            Ok(tbl) => tbl,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(()),
+            Err(e) => return Err(e.into()),
+        };
+        for entry in tbl.range::<&[u8]>((start, end))? {
+            let (k, v) = entry?;
+            if f(k.value(), v.value())? == ScanFlow::Stop {
+                break;
+            }
+        }
+        Ok(())
+    }
     fn commit(self: Box<Self>) -> Result<(), TalaDbError> {
         self.txn.commit()?;
         Ok(())

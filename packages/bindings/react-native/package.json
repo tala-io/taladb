@@ -1,6 +1,6 @@
 {
   "name": "@taladb/react-native",
-  "version": "0.11.9",
+  "version": "0.12.0",
   "description": "TalaDB React Native module — document and vector database via JSI HostObject",
   "main": "src/index",
   "types": "src/index.tsx",
@@ -31,12 +31,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/tala-io/taladb.git",
+    "url": "https://github.com/taladb/taladb.git",
     "directory": "packages/bindings/react-native"
   },
   "homepage": "https://taladb.dev/guide/react-native",
   "bugs": {
-    "url": "https://github.com/tala-io/taladb/issues"
+    "url": "https://github.com/taladb/taladb/issues"
   },
   "engines": {
     "node": ">=18"

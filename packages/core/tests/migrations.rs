@@ -1,6 +1,6 @@
-use taladb_core::engine::{RedbBackend, WriteTxn};
-use taladb_core::error::TalaDbError;
-use taladb_core::{Database, Filter, Migration, StorageBackend, Value};
+use taladb::engine::{RedbBackend, WriteTxn};
+use taladb::error::TalaDbError;
+use taladb::{Database, Filter, Migration, StorageBackend, Value};
 
 fn s(v: &str) -> Value {
     Value::Str(v.to_string())
@@ -12,7 +12,7 @@ fn i(n: i64) -> Value {
 /// Build an in-memory Database after running a set of migrations.
 fn open_migrated(migrations: &[Migration]) -> Database {
     let backend = RedbBackend::open_in_memory().unwrap();
-    taladb_core::migration::run_migrations(&backend, migrations).unwrap();
+    taladb::migration::run_migrations(&backend, migrations).unwrap();
     Database::open_with_backend(Box::new(backend)).unwrap()
 }
 
@@ -40,7 +40,7 @@ fn single_migration_runs_on_fresh_db() {
     }
 
     let backend = RedbBackend::open_in_memory().unwrap();
-    taladb_core::migration::run_migrations(
+    taladb::migration::run_migrations(
         &backend,
         &[Migration {
             from_version: 0,
@@ -53,7 +53,7 @@ fn single_migration_runs_on_fresh_db() {
 
     // Version should now be 1
     let rtxn = backend.begin_read().unwrap();
-    let version = taladb_core::migration::read_version(rtxn.as_ref()).unwrap();
+    let version = taladb::migration::read_version(rtxn.as_ref()).unwrap();
     assert_eq!(version, 1);
 }
 
@@ -71,7 +71,7 @@ fn two_migrations_run_in_order() {
     }
 
     let backend = RedbBackend::open_in_memory().unwrap();
-    taladb_core::migration::run_migrations(
+    taladb::migration::run_migrations(
         &backend,
         &[
             Migration {
@@ -91,7 +91,7 @@ fn two_migrations_run_in_order() {
     .unwrap();
 
     let rtxn = backend.begin_read().unwrap();
-    let version = taladb_core::migration::read_version(rtxn.as_ref()).unwrap();
+    let version = taladb::migration::read_version(rtxn.as_ref()).unwrap();
     assert_eq!(version, 2);
 
     let order = ORDER.lock().unwrap().clone();
@@ -113,12 +113,12 @@ fn already_applied_migration_is_skipped() {
     }];
 
     // First run
-    taladb_core::migration::run_migrations(&backend, &migrations).unwrap();
+    taladb::migration::run_migrations(&backend, &migrations).unwrap();
     // Second run with same list — must be a no-op, not an error
-    taladb_core::migration::run_migrations(&backend, &migrations).unwrap();
+    taladb::migration::run_migrations(&backend, &migrations).unwrap();
 
     let rtxn = backend.begin_read().unwrap();
-    let version = taladb_core::migration::read_version(rtxn.as_ref()).unwrap();
+    let version = taladb::migration::read_version(rtxn.as_ref()).unwrap();
     assert_eq!(version, 1);
 }
 
@@ -134,7 +134,7 @@ fn second_open_only_runs_pending_migration() {
     let backend = RedbBackend::open_in_memory().unwrap();
 
     // First open: only m1
-    taladb_core::migration::run_migrations(
+    taladb::migration::run_migrations(
         &backend,
         &[Migration {
             from_version: 0,
@@ -146,7 +146,7 @@ fn second_open_only_runs_pending_migration() {
     .unwrap();
 
     // Second open: m1 + m2 — only m2 should run
-    taladb_core::migration::run_migrations(
+    taladb::migration::run_migrations(
         &backend,
         &[
             Migration {
@@ -166,7 +166,7 @@ fn second_open_only_runs_pending_migration() {
     .unwrap();
 
     let rtxn = backend.begin_read().unwrap();
-    let version = taladb_core::migration::read_version(rtxn.as_ref()).unwrap();
+    let version = taladb::migration::read_version(rtxn.as_ref()).unwrap();
     assert_eq!(version, 2);
 }
 
@@ -181,7 +181,7 @@ fn gap_in_migration_chain_returns_error() {
     }
 
     let backend = RedbBackend::open_in_memory().unwrap();
-    let result = taladb_core::migration::run_migrations(
+    let result = taladb::migration::run_migrations(
         &backend,
         &[
             Migration {
@@ -250,7 +250,7 @@ fn out_of_order_migration_versions_returns_error() {
 
     let backend = RedbBackend::open_in_memory().unwrap();
     // from_version 1 before from_version 0 — not in chain order
-    let result = taladb_core::migration::run_migrations(
+    let result = taladb::migration::run_migrations(
         &backend,
         &[
             Migration {

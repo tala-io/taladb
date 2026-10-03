@@ -13,7 +13,7 @@
 //! source, so callers can walk the chain (or downcast) to make that decision:
 //!
 //! ```no_run
-//! # use taladb_core::TalaDbError;
+//! # use taladb::TalaDbError;
 //! # fn handle(err: TalaDbError) {
 //! use std::error::Error;
 //!
@@ -138,6 +138,10 @@ pub enum TalaDbError {
     #[error("invalid name: {0}")]
     InvalidName(String),
 
+    /// Internal ANN resource limit; the public search API falls back to exact.
+    #[error("ANN traversal exceeded the shared search memory allowance")]
+    SearchMemoryLimit,
+
     #[error("query exceeded the configured timeout")]
     QueryTimeout,
 
@@ -213,6 +217,7 @@ impl TalaDbError {
             Self::Config(_) => "Config",
             Self::InvalidName(_) => "InvalidName",
             Self::QueryTimeout => "QueryTimeout",
+            Self::SearchMemoryLimit => "SearchMemoryLimit",
             Self::ChangesetTooLarge => "ChangesetTooLarge",
         }
     }

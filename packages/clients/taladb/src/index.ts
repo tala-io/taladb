@@ -1,6 +1,6 @@
 import { createVectorClient, vectorIndexRequest } from './vector-client';
 export { createVectorClient } from './vector-client';
-export type { VectorClient, VectorQuantization, VectorGraphOptions, VectorQueryOptions, VectorRebuildOptions, VectorBuildProgress, VectorIndexStatus, VectorQueryResult, VectorRecall } from './vector-client';
+export type { MemoryPressure, VectorCacheStats, VectorClient, VectorQuantization, VectorGraphOptions, VectorQueryOptions, VectorRebuildOptions, VectorBuildProgress, VectorIndexStatus, VectorQueryResult, VectorRecall } from './vector-client';
 import type {
   Collection,
   CollectionIndexInfo,

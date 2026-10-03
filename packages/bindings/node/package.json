@@ -1,6 +1,6 @@
 {
   "name": "@taladb/node",
-  "version": "0.11.9",
+  "version": "0.12.0",
   "description": "TalaDB Node.js native module — document queries and vector search via napi-rs",
   "main": "index.js",
   "types": "index.d.ts",
@@ -31,12 +31,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/tala-io/taladb.git",
+    "url": "https://github.com/taladb/taladb.git",
     "directory": "packages/bindings/node"
   },
   "homepage": "https://taladb.dev/guide/node",
   "bugs": {
-    "url": "https://github.com/tala-io/taladb/issues"
+    "url": "https://github.com/taladb/taladb/issues"
   },
   "engines": {
     "node": ">=18",

@@ -3,17 +3,18 @@
 <img src=".github/assets/tala-db-banner.png" alt="TalaDB" width="800" />
 
 **An open-source embedded vector and document database for building local-first AI applications.**<br/>
-Store documents, metadata, and vectors together. Query structured data and semantic similarity from one embedded database — across the browser, Node.js, and React Native. No cloud required.
+Store documents, metadata, and vectors together. Query structured data and semantic similarity from one embedded database — across the browser, Node.js, React Native, and native Android (Kotlin) and iOS/macOS (Swift) apps. No cloud required.
 
 [![npm](https://img.shields.io/npm/v/taladb?label=npm)](https://www.npmjs.com/package/taladb)
-[![Status: Stable](https://img.shields.io/badge/Status-Stable-green)](https://github.com/tala-io/taladb)
+[![Status: Stable](https://img.shields.io/badge/Status-Stable-green)](https://github.com/taladb/taladb)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT_OR_Apache--2.0-blue.svg)](#license)
 [![Rust](https://img.shields.io/badge/Rust-2024_Edition-orange?logo=rust)](https://www.rust-lang.org)
 [![WASM](https://img.shields.io/badge/WASM-wasm--bindgen-purple?logo=webassembly)](https://rustwasm.github.io/wasm-bindgen/)
-[![Platform](https://img.shields.io/badge/Platform-Browser%20%7C%20React%20Native%20%7C%20Node.js-green)](https://github.com/tala-io/taladb)
+[![Platform](https://img.shields.io/badge/Platform-Browser%20%7C%20Node.js%20%7C%20React%20Native%20%7C%20Android%20%7C%20iOS-green)](https://github.com/taladb/taladb)
 [![Sponsor](https://img.shields.io/badge/Sponsor-taladb-red?logo=github-sponsors)](https://github.com/sponsors/tala-sh)
 
-**[Documentation](https://taladb.dev) · [Web Demo](https://taladb-playground.vercel.app/) · [Mobile Demo](https://appetize.io/app/b_ugmjhjghdkgnjux4lzkepvsfma) · [Web Guide](https://taladb.dev/guide/web) · [Node.js Guide](https://taladb.dev/guide/node) · [React Native Guide](https://taladb.dev/guide/react-native)**
+**[Documentation](https://taladb.dev) · [Web Demo](https://taladb-playground.vercel.app/) · [React Native Demo](https://play.google.com/store/apps/details?id=dev.thinkgrid.kepta) · [Android Demo](#) · [iOS Demo](#)**<br/>
+**[Web Guide](https://taladb.dev/guide/web) · [Node.js Guide](https://taladb.dev/guide/node) · [React Native Guide](https://taladb.dev/guide/react-native) · [Kotlin Guide](https://taladb.dev/guide/android) · [Swift Guide](https://taladb.dev/guide/swift)**
 
 </div>
 
@@ -22,37 +23,36 @@ Store documents, metadata, and vectors together. Query structured data and seman
 
 AI inference is moving onto the device — transformers.js and ONNX Runtime Web in the browser, Core ML and ExecuTorch on mobile. The model runs locally, but the *retrieval* layer usually doesn't: embeddings get shipped to a hosted vector database, which puts back the latency, the per-query cost, and the privacy exposure that running locally was supposed to remove.
 
-TalaDB combines a document database and a vector database in one embedded engine. Store JSON-like documents, query them with familiar filters, and run vector similarity search entirely on the user's device — with the same Rust core and TypeScript API across the browser, React Native, and Node.js.
+TalaDB combines a document database and a vector database in one embedded engine. Store JSON-like documents, query them with familiar filters, and run vector similarity search entirely on the user's device — with the same Rust core everywhere: one TypeScript API across the browser, Node.js, and React Native, plus native Kotlin and Swift packages for Android and iOS/macOS.
 
 ## Why TalaDB?
 
-|  | TalaDB | RxDB / Dexie | Expo SQLite | LanceDB |
-|---|---|---|---|---|
-| Runs in browser | ✓ | ✓ | ✗ | ✗ |
-| React Native | ✓ | ✗ | ✓ | ✗ |
-| On-device vector search | ✓ | ✗ | ✗ | ✓ |
-| Unified API across runtimes | ✓ | ✗ | ✗ | ✗ |
-| No cloud required | ✓ | ✓ | ✓ | ✗ |
-| Rust core | ✓ | ✗ | ✗ | ✓ |
+|  | TalaDB | RxDB | Dexie | Expo SQLite | LanceDB |
+|---|---|---|---|---|---|
+| Runs in browser | ✓ | ✓ | ✓ | Alpha | ✗ |
+| React Native | ✓ | ✓ | ✗ | ✓ | ✗ |
+| Native Android & iOS (Kotlin, Swift) | ✓ | ✗ | ✗ | ✗ | ✗ |
+| Built-in vector index | ✓ | ✗ ¹ | ✗ | Via `sqlite-vec` | ✓ |
+| Rust core | ✓ | ✗ | ✗ | ✗ | ✓ |
 
-*The only embedded database with vector search that runs on all three JS runtimes with a single API.*
+<sub>¹ RxDB ships distance helpers for building vector search yourself, not a vector index.</sub>
 
-The same Rust core powers all three runtimes:
+*One embedded engine for documents and vectors — from the browser to native mobile apps — with no server to run.*
 
-| Runtime | Package | Mechanism |
-|---|---|---|
-| Browser | `@taladb/web` | `wasm-bindgen` + OPFS via DedicatedWorker |
-| Node.js | `@taladb/node` | `napi-rs` native module |
-| React Native | `@taladb/react-native` | JSI HostObject (C FFI via `cbindgen`) |
+The same Rust core powers every platform:
 
-Application code uses the unified `taladb` package with a single TypeScript API on every platform.
+| Platform | Package | Mechanism | Status |
+|---|---|---|---|
+| Browser | `@taladb/web` | `wasm-bindgen` + OPFS via DedicatedWorker | Stable |
+| Node.js | `@taladb/node` | `napi-rs` native module | Stable |
+| React Native | `@taladb/react-native` | JSI HostObject (C FFI via `cbindgen`) | Stable |
+| Android (Kotlin) | [`taladb-kotlin`](https://github.com/taladb/taladb-kotlin) · `dev.taladb:taladb-android` | JNI over the C FFI · [guide](https://taladb.dev/guide/android) | Early release |
+| iOS & macOS (Swift) | [`taladb-swift`](https://github.com/taladb/taladb-swift) | SwiftPM over the C FFI · [guide](https://taladb.dev/guide/swift) | Early release |
+| Rust | [`taladb`](https://crates.io/crates/taladb) | The engine crate itself · [guide](https://taladb.dev/guide/rust) | Early release |
 
-**Native apps (early release).** Android apps in Kotlin and iOS/macOS apps in Swift can use the same engine without React Native, through first-party packages over the C FFI. Both are early releases: their APIs may still change, and they are not yet published to Maven Central or tagged for SwiftPM.
+On the web, Node.js, and React Native, application code uses the unified `taladb` package with a single TypeScript API. Kotlin, Swift, and Rust apps get idiomatic native APIs over the same engine, with the same JSON filters, vector and full-text search, and live queries.
 
-| Platform | Package | Mechanism |
-|---|---|---|
-| Android (Kotlin) | [`taladb-kotlin`](https://github.com/tala-io/taladb-kotlin) · `dev.taladb:taladb-android` | JNI over the C FFI · [guide](https://taladb.dev/guide/android) |
-| iOS & macOS (Swift) | [`taladb-swift`](https://github.com/tala-io/taladb-swift) | SwiftPM over the C FFI · [guide](https://taladb.dev/guide/swift) |
+Early-release packages may still change their APIs, and the Kotlin and Swift packages are not yet published to Maven Central or tagged for SwiftPM.
 
 ## Highlights
 

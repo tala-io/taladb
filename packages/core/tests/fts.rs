@@ -1,5 +1,5 @@
-use taladb_core::document::Value;
-use taladb_core::{Database, Filter};
+use taladb::document::Value;
+use taladb::{Database, Filter};
 
 fn s(v: &str) -> Value {
     Value::Str(v.to_string())
@@ -192,7 +192,7 @@ fn fts_index_maintained_on_update() {
     // Update to remove old token and add new one
     col.update_one(
         Filter::Contains("body".into(), "databases".into()),
-        taladb_core::Update::Set(vec![("body".into(), s("new content about rust"))]),
+        taladb::Update::Set(vec![("body".into(), s("new content about rust"))]),
     )
     .unwrap();
 

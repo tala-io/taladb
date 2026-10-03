@@ -7,10 +7,10 @@
 //! through `find()` returned `InvalidFilter`. Same query, two answers, and the
 //! wrong one looks like a legitimately empty result set.
 
-use taladb_core::Database;
-use taladb_core::aggregate::Stage;
-use taladb_core::document::Value;
-use taladb_core::query::Filter;
+use taladb::Database;
+use taladb::aggregate::Stage;
+use taladb::document::Value;
+use taladb::query::Filter;
 
 fn db_with_emails() -> Database {
     let db = Database::open_in_memory().unwrap();

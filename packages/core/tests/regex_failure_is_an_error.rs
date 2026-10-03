@@ -15,9 +15,9 @@
 
 use std::collections::HashMap;
 
-use taladb_core::aggregate::Stage;
-use taladb_core::document::Value;
-use taladb_core::{Database, Filter};
+use taladb::aggregate::Stage;
+use taladb::document::Value;
+use taladb::{Database, Filter};
 
 /// Valid syntax; compiles to an automaton far past the 1 MiB ceiling.
 fn oversized_pattern() -> String {

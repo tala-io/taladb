@@ -30,7 +30,7 @@ header = """
  *
  * This is the stable C interface of the Rust taladb-ffi crate. Its consumers
  * are the React Native JSI HostObject and TurboModule in this repository and
- * the native Swift (tala-io/taladb-swift) and Kotlin (tala-io/taladb-kotlin)
+ * the native Swift (taladb/taladb-swift) and Kotlin (taladb/taladb-kotlin)
  * packages, which ship as separate repositories.
  *
  * Compatibility

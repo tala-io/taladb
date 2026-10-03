@@ -4,7 +4,7 @@
 //! "vector-hnsw")]`, and the allocation these tests guard is the one the
 //! default build (browser and React Native) was paying for without the feature.
 
-use taladb_core::{Database, Value, VectorMetric};
+use taladb::{Database, Value, VectorMetric};
 
 // ---------------------------------------------------------------------------
 // Backfill

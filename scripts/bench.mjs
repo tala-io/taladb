@@ -266,8 +266,7 @@ try {
       }
 
       if (N === 50_000 && !skipHnsw) {
-        // HNSW — approximate index (needs a binary built with vector-hnsw,
-        // shipped in @taladb/node since 0.8.3). Recall is measured against
+        // HNSW — portable approximate index. Recall is measured against
         // the exact flat results for the same query vectors. Measured at 50k,
         // not 100k: graph construction is CPU-heavy (tens of minutes at 100k
         // on laptop hardware), which would make the suite impractical to run.
@@ -288,7 +287,7 @@ try {
         if (recall < 0.5) {
           // Latency ≈ flat + recall 100% would also betray a flat fallback;
           // a low-recall or flat-identical result means the feature is absent.
-          console.error('warning: HNSW recall suspiciously low — is the binary built with vector-hnsw?')
+          console.error('warning: HNSW recall is low on this dataset; inspect index status and tune graph/search parameters')
         }
         row(`findNearest (HNSW), ${N.toLocaleString('en-US')} vectors`, `approximate; recall@10 = ${(recall * 100).toFixed(0)}% vs exact`, fmtMs(ra.median), { median: ra.median, iters: ra.iters, recall })
         row(`HNSW graph build, ${N.toLocaleString('en-US')} vectors`, 'createVectorIndex backfill + graph build, one-off', fmtMs(buildMs), { median: buildMs })

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { execFileSync } from "child_process";
 import { readFileSync, writeFileSync } from "fs";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
@@ -50,6 +51,17 @@ let cargo = readFileSync(cargoPath, "utf8");
 cargo = cargo.replace(/^(version\s*=\s*)"[^"]*"/m, `$1"${version}"`);
 writeFileSync(cargoPath, cargo);
 console.log(`✓ Cargo.toml → ${version}`);
+
+// Sync Cargo.lock — `cargo publish --locked` in the release workflow fails on
+// a lockfile that still records the old workspace version. `-w` touches only
+// the workspace's own crates, never third-party dependencies.
+try {
+  execFileSync("cargo", ["update", "-w"], { cwd: root, stdio: "inherit" });
+  console.log(`✓ Cargo.lock → ${version}`);
+} catch (err) {
+  console.error(`✗ Cargo.lock not updated (${err.message}) — run \`cargo update -w\` before releasing`);
+  process.exitCode = 1;
+}
 
 // Sync VitePress nav version badge
 const vpConfigPath = resolve(root, "docs/.vitepress/config.mts");

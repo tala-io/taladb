@@ -9,13 +9,12 @@
     <line x1="560" y1="326" x2="1400" y2="326"/>
   </g>
 
-  <g transform="translate(80,58) scale(0.78)">
-    <rect x="14" y="16" width="16" height="16" rx="4" fill="#3157D9"/>
-    <rect x="14" y="42" width="16" height="16" rx="4" fill="#39414C"/>
-    <rect x="14" y="68" width="16" height="16" rx="4" fill="#39414C"/>
-    <rect x="38" y="16" width="48" height="16" rx="4" fill="none" stroke="#5B7BDE" stroke-width="5"/>
-    <rect x="38" y="42" width="40" height="16" rx="4" fill="none" stroke="#454E5A" stroke-width="5"/>
-    <rect x="38" y="68" width="30" height="16" rx="4" fill="none" stroke="#454E5A" stroke-width="5"/>
+  <g transform="translate(79.9,61.1) scale(0.74)">
+    <g fill="none" stroke="#3157D9" stroke-width="6">
+      <ellipse cx="44" cy="32" rx="26" ry="9"/>
+      <path d="M18 32 V76 C18 81.5 29.6 86 44 86 C58.4 86 70 81.5 70 76 V32"/>
+    </g>
+    <path d="M70 8 C74.4 23.6 74.4 23.6 90 28 C74.4 32.4 74.4 32.4 70 48 C65.6 32.4 65.6 32.4 50 28 C65.6 23.6 65.6 23.6 70 8Z" fill="#5B7BDE" stroke="#12151A" stroke-width="8" stroke-linejoin="round" paint-order="stroke"/>
   </g>
 
   <text x="178" y="122" font-family="'Avenir Next','Century Gothic','Segoe UI',sans-serif" font-size="58" font-weight="800" letter-spacing="-1">

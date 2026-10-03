@@ -6,11 +6,11 @@ description: Planned and in-progress features for TalaDB
 # Roadmap
 
 What's planned for TalaDB, roughly in order of impact. Shipped work is recorded
-in the [changelog](https://github.com/tala-io/taladb/blob/main/CHANGELOG.md);
+in the [changelog](https://github.com/taladb/taladb/blob/main/CHANGELOG.md);
 this page tracks only what's still open.
 
 Have an idea, or want to help prioritise? Open a
-[GitHub Discussion](https://github.com/tala-io/taladb/discussions) or a feature
+[GitHub Discussion](https://github.com/taladb/taladb/discussions) or a feature
 request issue.
 
 ---
@@ -42,23 +42,22 @@ request issue.
 The goal is to keep TalaDB among the fastest embedded databases on every
 JavaScript runtime.
 
-- **Faster vector index builds** — graph construction is the current limit on
-  large indexes, and the main thing standing between approximate search and
-  mobile devices.
-- **Better approximate-search recall at scale** — recall falls off faster as a
-  collection grows than it should.
-- **Lower graph traversal cost** — smarter cache eviction and leaner cached
-  nodes, so larger graphs stay resident in memory.
+- **Better approximate-search recall at scale** — improve candidate selection
+  and graph connectivity, validated against exact search on larger collections
+  and representative embedding datasets.
+- **Automatic native memory signals** — connect Android/iOS memory hints and
+  pressure callbacks in the native packages. Adaptive cache sizing, browser
+  device-memory hints and explicit pressure/recovery commands already ship;
+  native hosts currently forward signals themselves.
 - **Wider native SIMD** — a runtime-detected AVX2/NEON kernel on top of the
   portable vectorisation already in place.
-- **Faster filtered vector search** — stop materialising whole documents just to
-  collect the ids a filter matched.
 - **Index tuning guidance by device class** — recommended parameters from
   low-memory phones through desktops.
-- **Adaptive cache sizing** — size the decoded-vector cache from the device's
-  memory budget instead of one fixed default.
-- **Continuous benchmarks** — run the suites in CI each release and publish the
-  trend, so regressions are caught before they ship.
+- **Broader benchmark coverage** — automate physical Android/iOS device runs,
+  cover more browser engines and representative embedding datasets, and publish
+  peak-memory measurements and trends across releases. Native and Chromium
+  worker/OPFS comparisons already run in CI; manual phone-browser runs use the
+  [vector benchmark workload](/guide/vector-benchmarks).
 
 ---
 
@@ -75,7 +74,5 @@ JavaScript runtime.
 
 - **Swift and Kotlin packages** — *early release available:*
   [Android (Kotlin)](/guide/android) and [iOS & macOS (Swift)](/guide/swift).
-  Next: publish them to Maven Central and SwiftPM, then settle the API for a
-  stable release.
 - **WASI target** — run the same engine inside Wasmtime, WasmEdge and Fastly
   Compute.

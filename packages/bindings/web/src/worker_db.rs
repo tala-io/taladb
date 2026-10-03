@@ -141,7 +141,13 @@ impl WorkerDB {
                 .map_err(|e| JsValue::from_str(&e.to_string()))?,
             _ => Database::open_in_memory().map_err(|e| JsValue::from_str(&e.to_string()))?,
         };
-        let _ = config_json;
+        if let Some(json) = config_json {
+            let config: taladb_core::TalaDbConfig = serde_json::from_str(&json)
+                .map_err(|e| JsValue::from_str(&format!("invalid config JSON: {e}")))?;
+            config
+                .apply_vector_cache(&db)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        }
         Ok(Self { db })
     }
 
@@ -240,7 +246,13 @@ impl WorkerDB {
 
         let db = Database::open_with_backend(backend)
             .map_err(|e: taladb_core::TalaDbError| JsValue::from_str(&e.to_string()))?;
-        let _ = config_json;
+        if let Some(json) = config_json {
+            let config: taladb_core::TalaDbConfig = serde_json::from_str(&json)
+                .map_err(|e| JsValue::from_str(&format!("invalid config JSON: {e}")))?;
+            config
+                .apply_vector_cache(&db)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        }
         Ok(Self { db })
     }
 
@@ -921,6 +933,11 @@ fn bm25_from_options(options: Option<&serde_json::Value>) -> taladb_core::bm25::
         }
         if let Some(v) = o.get("b").and_then(serde_json::Value::as_f64) {
             params.b = v as f32;
+        }
+        // "stopwords": false searches every query word, as before stopword
+        // filtering existed. Defaults to true.
+        if let Some(v) = o.get("stopwords").and_then(serde_json::Value::as_bool) {
+            params.stopwords = v;
         }
     }
     params

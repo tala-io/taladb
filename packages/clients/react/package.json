@@ -1,6 +1,6 @@
 {
   "name": "@taladb/react",
-  "version": "0.11.9",
+  "version": "0.12.0",
   "description": "React hooks for TalaDB — useFind, useFindOne, and useCollection for React and React Native",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
@@ -45,19 +45,19 @@
   "license": "MIT OR Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/tala-io/taladb.git",
+    "url": "https://github.com/taladb/taladb.git",
     "directory": "packages/clients/react"
   },
   "homepage": "https://taladb.dev/guide/react",
   "bugs": {
-    "url": "https://github.com/tala-io/taladb/issues"
+    "url": "https://github.com/taladb/taladb/issues"
   },
   "engines": {
     "node": ">=18"
   },
   "peerDependencies": {
     "react": ">=18.0.0",
-    "taladb": "^0.11.9"
+    "taladb": "^0.12.0"
   },
   "devDependencies": {
     "@testing-library/react": "^16.0.0",

@@ -102,6 +102,19 @@ enum RegexSource<'a> {
 }
 
 impl Filter {
+    /// Scalar evaluation shared by document/array matching and covered indexes.
+    pub(super) fn matches_index_value(&self, value: &Value) -> bool {
+        use std::cmp::Ordering::{Equal, Greater, Less};
+        match self {
+            Self::Eq(_, v) => value == v,
+            Self::In(_, values) => values.contains(value),
+            Self::Gt(_, v) => value.partial_cmp_numeric(v) == Some(Greater),
+            Self::Gte(_, v) => matches!(value.partial_cmp_numeric(v), Some(Greater | Equal)),
+            Self::Lt(_, v) => value.partial_cmp_numeric(v) == Some(Less),
+            Self::Lte(_, v) => matches!(value.partial_cmp_numeric(v), Some(Less | Equal)),
+            _ => false,
+        }
+    }
     /// Evaluate the arms that cannot fail — every predicate that does not involve
     /// a regex or a sub-filter. The composite and `Regex` arms are handled by
     /// [`Filter::eval`] before it delegates here, so they are unreachable; each
@@ -115,7 +128,8 @@ impl Filter {
                 if field == "_id" {
                     return matches!(val, Value::Str(s) if s == &doc.id.to_string());
                 }
-                doc.get(field).is_some_and(|v| any_element(v, |e| e == val))
+                doc.get(field)
+                    .is_some_and(|v| any_element(v, |e| self.matches_index_value(e)))
             }
 
             // Negation is over the *document*, not the element: `$ne` excludes a
@@ -128,35 +142,10 @@ impl Filter {
                 doc.get(field).is_none_or(|v| !any_element(v, |e| e == val))
             }
 
-            Self::Gt(field, val) => doc.get(field).is_some_and(|v| {
-                any_element(v, |e| {
-                    e.partial_cmp_numeric(val) == Some(std::cmp::Ordering::Greater)
-                })
-            }),
-
-            Self::Gte(field, val) => doc.get(field).is_some_and(|v| {
-                any_element(v, |e| {
-                    matches!(
-                        e.partial_cmp_numeric(val),
-                        Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
-                    )
-                })
-            }),
-
-            Self::Lt(field, val) => doc.get(field).is_some_and(|v| {
-                any_element(v, |e| {
-                    e.partial_cmp_numeric(val) == Some(std::cmp::Ordering::Less)
-                })
-            }),
-
-            Self::Lte(field, val) => doc.get(field).is_some_and(|v| {
-                any_element(v, |e| {
-                    matches!(
-                        e.partial_cmp_numeric(val),
-                        Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
-                    )
-                })
-            }),
+            Self::Gt(field, _) | Self::Gte(field, _) | Self::Lt(field, _) | Self::Lte(field, _) => {
+                doc.get(field)
+                    .is_some_and(|v| any_element(v, |e| self.matches_index_value(e)))
+            }
 
             Self::In(field, vals) => {
                 if field == "_id" {
@@ -166,7 +155,7 @@ impl Filter {
                         .any(|v| matches!(v, Value::Str(s) if *s == id_str));
                 }
                 doc.get(field)
-                    .is_some_and(|v| any_element(v, |e| vals.contains(e)))
+                    .is_some_and(|v| any_element(v, |e| self.matches_index_value(e)))
             }
 
             Self::Nin(field, vals) => {

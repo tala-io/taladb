@@ -1,7 +1,7 @@
 //! Integration tests for Database::export_snapshot / restore_from_snapshot
 //! and Database::list_collection_names.
 
-use taladb_core::{Database, Filter, Value};
+use taladb::{Database, Filter, Value};
 
 fn s(v: &str) -> Value {
     Value::Str(v.to_string())

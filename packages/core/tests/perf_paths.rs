@@ -6,8 +6,8 @@
 //! of per-document. These tests pin the *observable* behaviour so the fast path
 //! can never quietly disagree with the slow one it replaced.
 
-use taladb_core::query::options::{FindOptions, SortSpec};
-use taladb_core::{Database, Filter, Update, Value};
+use taladb::query::options::{FindOptions, SortSpec};
+use taladb::{Database, Filter, Update, Value};
 
 fn db() -> Database {
     Database::open_in_memory().unwrap()
@@ -99,13 +99,13 @@ fn index_and_agrees_with_unindexed_result() {
         .find(filter.clone())
         .unwrap()
         .iter()
-        .filter_map(|d| d.get("x").and_then(taladb_core::Value::as_int))
+        .filter_map(|d| d.get("x").and_then(taladb::Value::as_int))
         .collect();
     let mut want: Vec<i64> = b
         .find(filter)
         .unwrap()
         .iter()
-        .filter_map(|d| d.get("x").and_then(taladb_core::Value::as_int))
+        .filter_map(|d| d.get("x").and_then(taladb::Value::as_int))
         .collect();
     got.sort_unstable();
     want.sort_unstable();
@@ -224,9 +224,9 @@ fn find_one_no_match_is_none() {
 #[cfg(feature = "encryption")]
 #[test]
 fn find_one_decrypts_like_find() {
-    use taladb_core::derive_key;
+    use taladb::derive_key;
     let db = db();
-    let key = derive_key("pw", &[7u8; 16], taladb_core::MIN_PBKDF2_ITERATIONS).unwrap();
+    let key = derive_key("pw", &[7u8; 16], taladb::MIN_PBKDF2_ITERATIONS).unwrap();
     let col = db
         .collection("t")
         .unwrap()
@@ -447,7 +447,7 @@ fn sorted_limit_still_sees_every_candidate() {
         .unwrap();
     let got: Vec<i64> = top
         .iter()
-        .filter_map(|d| d.get("n").and_then(taladb_core::Value::as_int))
+        .filter_map(|d| d.get("n").and_then(taladb::Value::as_int))
         .collect();
     assert_eq!(got, vec![199, 198, 197]);
 }
@@ -644,8 +644,8 @@ fn update_moving_index_key_clears_the_old_entry() {
 /// scorer. It must rank identically to the general `compute_similarity`.
 #[test]
 fn hoisted_query_norm_scores_match_compute_similarity() {
-    use taladb_core::VectorMetric;
-    use taladb_core::vector::{compute_similarity, l2_norm, score_with_query_norm};
+    use taladb::VectorMetric;
+    use taladb::vector::{compute_similarity, l2_norm, score_with_query_norm};
 
     let query = vec![0.3f32, -1.5, 2.0, 0.0];
     let norm = l2_norm(&query);

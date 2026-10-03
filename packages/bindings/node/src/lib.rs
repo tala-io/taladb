@@ -319,8 +319,8 @@ impl TalaDBNode {
 
     /// Open a file-backed database at the given path.
     ///
-    /// `config_json` is an optional JSON-serialised `TalaDbConfig`; only its
-    /// `durability` block is read here. Change webhooks are delivered by the
+    /// `config_json` is an optional JSON-serialised `TalaDbConfig` for durability
+    /// and vector cache settings. Change webhooks are delivered by the
     /// `taladb` TypeScript client, not by this binding.
     #[napi(factory)]
     pub fn open(
@@ -328,16 +328,20 @@ impl TalaDBNode {
         config_json: Option<String>,
         passphrase: Option<String>,
     ) -> napi::Result<Self> {
+        let config = config_json
+            .as_deref()
+            .map(serde_json::from_str::<TalaDbConfig>)
+            .transpose()
+            .map_err(|e| napi::Error::from_reason(format!("invalid config JSON: {e}")))?;
         let db = match passphrase {
             Some(passphrase) => Database::open_encrypted(std::path::Path::new(&path), &passphrase),
             None => Database::open(std::path::Path::new(&path)),
         }
         .map_err(err_to_napi)?;
         // Apply durability from config (default: flush every write / immediate).
-        if let Some(json) = config_json.as_deref()
-            && let Ok(cfg) = serde_json::from_str::<TalaDbConfig>(json)
-        {
+        if let Some(cfg) = config {
             db.set_durability(!cfg.durability.flush_every_write);
+            cfg.apply_vector_cache(&db).map_err(err_to_napi)?;
         }
         Ok(Self { inner: Some(db) })
     }
@@ -858,6 +862,11 @@ fn parse_bm25_options(options: Option<&JsonValue>) -> taladb_core::bm25::Bm25Par
         }
         if let Some(v) = o.get("b").and_then(serde_json::Value::as_f64) {
             params.b = v as f32;
+        }
+        // "stopwords": false searches every query word, as before stopword
+        // filtering existed. Defaults to true.
+        if let Some(v) = o.get("stopwords").and_then(serde_json::Value::as_bool) {
+            params.stopwords = v;
         }
     }
     params

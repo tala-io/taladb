@@ -59,7 +59,28 @@ export interface VectorRecall {
   exactMs: number;
   annMs: number;
 }
+export type MemoryPressure = 'normal' | 'moderate' | 'critical';
+export interface VectorCacheStats {
+  budgetBytes: number;
+  baselineBudgetBytes: number;
+  policy: 'adaptive' | 'fixed';
+  memoryHintBytes: number | null;
+  pressure: MemoryPressure;
+  retainedBytes: number;
+  memoryBudgetBytes: number;
+  activeBytes: number;
+  peakBytes: number;
+  vectorIndexes: number;
+  graphIndexes: number;
+}
 export interface VectorClient<T> {
+  /** Cache controls apply to all collections in this database. */
+  vectorCacheStats(): Promise<VectorCacheStats>;
+  setVectorCacheBudget(bytes: number): Promise<VectorCacheStats>;
+  /** Omit the hint to restore the platform fallback; pressure remains active. */
+  setVectorCacheAdaptive(memoryBytes?: number): Promise<VectorCacheStats>;
+  /** Normal explicitly restores the baseline after a pressure signal. */
+  notifyMemoryPressure(level: MemoryPressure): Promise<VectorCacheStats>;
   searchVectors(field: string, vector: ArrayLike<number>, topK: number, filter?: Record<string, unknown>, options?: VectorQueryOptions): Promise<VectorQueryResult<T>>;
   /** Exact range search. Returns every matching document above the score threshold. */
   findWithin(field: string, vector: ArrayLike<number>, scoreThreshold: number, filter?: Record<string, unknown>): Promise<VectorQueryResult<T>>;
@@ -96,6 +117,19 @@ function abortError(): Error {
 /** Binding adapter used by TalaDB's Node, browser, and React Native packages. */
 export function createVectorClient<T>(send: (request: Record<string, unknown>) => Promise<any>): VectorClient<T> {
   const client: VectorClient<T> = {
+    vectorCacheStats: () => send({ op: 'cacheStats' }),
+    setVectorCacheBudget: async bytes => {
+      integer(bytes, 'bytes');
+      return send({ op: 'cacheBudget', bytes });
+    },
+    setVectorCacheAdaptive: async memoryBytes => {
+      if (memoryBytes !== undefined) integer(memoryBytes, 'memoryBytes', 1, Number.MAX_SAFE_INTEGER);
+      return send({ op: 'cacheAdaptive', memoryBytes });
+    },
+    notifyMemoryPressure: async level => {
+      if (!['normal', 'moderate', 'critical'].includes(level)) throw new Error('invalid memory pressure level');
+      return send({ op: 'memoryPressure', level });
+    },
     searchVectors: async (field, vector, topK, filter, options = {}) => {
       integer(topK, 'topK');
       return send({ op: 'search', field, query: vectorValues(vector), topK, filter, options: queryOptions(options) });

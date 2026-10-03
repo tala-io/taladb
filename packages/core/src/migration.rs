@@ -4,9 +4,9 @@ use crate::document::{Document, Value};
 use crate::engine::{KvOp, StorageBackend, WriteTxn};
 use crate::error::TalaDbError;
 use crate::index::{
-    CompoundIndexDef, IndexDef, META_COMPOUND_TABLE, META_INDEXES_TABLE, META_VERSION_KEY,
-    META_VERSION_TABLE, compound_table_name, docs_table_name, encode_compound_keys,
-    encode_index_keys, index_table_name,
+    CompoundIndexDef, IndexDef, META_COMPOUND_TABLE, META_INDEX_ARRAYS_TABLE, META_INDEXES_TABLE,
+    META_VERSION_KEY, META_VERSION_TABLE, compound_table_name, docs_table_name,
+    encode_compound_keys, encode_index_keys, index_table_name, meta_key,
 };
 
 /// A single schema migration step.
@@ -161,9 +161,11 @@ pub fn rebuild_secondary_indexes(txn: &mut dyn WriteTxn) -> Result<(), TalaDbErr
         let docs_table = docs_table_name(&def.collection);
         let docs = txn.range(&docs_table, Bound::Unbounded, Bound::Unbounded)?;
         let mut new_keys: Vec<Vec<u8>> = Vec::with_capacity(docs.len());
+        let mut arrays = 0u64;
         for (_, doc_bytes) in docs {
             let doc: Document = postcard::from_bytes(&doc_bytes)?;
             if let Some(val) = doc.get(&def.field) {
+                arrays += u64::from(matches!(val, Value::Array(_)));
                 // Per-element keys for arrays — the rebuild must produce what
                 // the current write path produces, or an array field would stay
                 // unqueryable on any database that came through this migration.
@@ -179,6 +181,11 @@ pub fn rebuild_secondary_indexes(txn: &mut dyn WriteTxn) -> Result<(), TalaDbErr
             .chain(new_keys.iter().map(|k| KvOp::Put(k.as_slice(), &[])))
             .collect();
         txn.apply_batch(&idx_table, &ops)?;
+        txn.put(
+            META_INDEX_ARRAYS_TABLE,
+            meta_key(&def.collection, &def.field).as_bytes(),
+            &arrays.to_le_bytes(),
+        )?;
     }
     Ok(())
 }

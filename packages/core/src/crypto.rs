@@ -311,6 +311,18 @@ impl<'a> WriteTxn for EncryptedWriteTxn<'a> {
             .collect()
     }
 
+    fn scan(
+        &self,
+        table: &str,
+        start: Bound<&[u8]>,
+        end: Bound<&[u8]>,
+        f: crate::engine::ScanFn<'_>,
+    ) -> Result<(), TalaDbError> {
+        self.inner.scan(table, start, end, &mut |k, v| {
+            let plain = decrypt(self.key, table, k, v)?;
+            f(k, &plain)
+        })
+    }
     fn commit(self: Box<Self>) -> Result<(), TalaDbError> {
         self.inner.commit()
     }
@@ -799,6 +811,35 @@ mod tests {
 
     fn test_key() -> EncryptionKey {
         zeroize::Zeroizing::new([0x42u8; 32])
+    }
+
+    #[test]
+    fn writer_scan_stops_before_decrypting_an_untouched_corrupt_record() {
+        use crate::engine::{RedbBackend, ScanFlow};
+        let raw = Arc::new(RedbBackend::open_in_memory().unwrap());
+        let encrypted = EncryptedBackend::new(raw.clone(), test_key());
+        let mut txn = encrypted.begin_write().unwrap();
+        txn.put("items", b"a", b"valid").unwrap();
+        txn.commit().unwrap();
+        let mut txn = raw.begin_write().unwrap();
+        txn.put("items", b"b", b"corrupt ciphertext").unwrap();
+        txn.commit().unwrap();
+        let txn = encrypted.begin_write().unwrap();
+        let mut seen = 0;
+        txn.scan("items", Bound::Unbounded, Bound::Unbounded, &mut |k, v| {
+            assert_eq!(k, b"a");
+            assert_eq!(v, b"valid");
+            seen += 1;
+            Ok(ScanFlow::Stop)
+        })
+        .unwrap();
+        assert_eq!(seen, 1);
+        assert!(
+            txn.scan("items", Bound::Unbounded, Bound::Unbounded, &mut |_, _| Ok(
+                ScanFlow::Continue
+            ))
+            .is_err()
+        );
     }
 
     #[test]

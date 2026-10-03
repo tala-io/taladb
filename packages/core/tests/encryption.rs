@@ -6,10 +6,10 @@
 
 use std::sync::Arc;
 
-use taladb_core::crypto::{EncryptedBackend, MIN_PBKDF2_ITERATIONS, decrypt, derive_key, encrypt};
-use taladb_core::document::Value;
-use taladb_core::engine::RedbBackend;
-use taladb_core::{Database, Filter};
+use taladb::crypto::{EncryptedBackend, MIN_PBKDF2_ITERATIONS, decrypt, derive_key, encrypt};
+use taladb::document::Value;
+use taladb::engine::RedbBackend;
+use taladb::{Database, Filter};
 use zeroize::Zeroizing;
 
 #[test]
@@ -184,7 +184,7 @@ fn encrypted_backend_update_and_delete() {
     let updated = col
         .update_one(
             Filter::Eq("value".into(), i(1)),
-            taladb_core::Update::Set(vec![("value".into(), i(2))]),
+            taladb::Update::Set(vec![("value".into(), i(2))]),
         )
         .unwrap();
     assert!(updated);
@@ -268,20 +268,20 @@ fn encrypted_backend_multiple_docs() {
 
 #[test]
 fn rekey_returns_positive_count_on_non_empty_db() {
-    use taladb_core::engine::RedbBackend;
-    use taladb_core::rekey;
+    use taladb::engine::RedbBackend;
+    use taladb::rekey;
     use zeroize::Zeroizing;
 
     let old_key = Zeroizing::new([1u8; 32]);
     let new_key = Zeroizing::new([2u8; 32]);
 
     let inner = Arc::new(RedbBackend::open_in_memory().unwrap());
-    let inner_dyn: Arc<dyn taladb_core::StorageBackend> = inner.clone();
-    let enc = Box::new(taladb_core::crypto::EncryptedBackend::new(
+    let inner_dyn: Arc<dyn taladb::StorageBackend> = inner.clone();
+    let enc = Box::new(taladb::crypto::EncryptedBackend::new(
         inner_dyn,
         Zeroizing::new([1u8; 32]),
     ));
-    let db = taladb_core::Database::open_with_backend(enc).unwrap();
+    let db = taladb::Database::open_with_backend(enc).unwrap();
     let col = db.collection("secrets").unwrap();
     col.insert(vec![("v".into(), s("hello"))]).unwrap();
     col.insert(vec![("v".into(), s("world"))]).unwrap();
@@ -297,8 +297,8 @@ fn rekey_returns_positive_count_on_non_empty_db() {
 
 #[test]
 fn rekey_wrong_old_key_fails() {
-    use taladb_core::engine::RedbBackend;
-    use taladb_core::rekey;
+    use taladb::engine::RedbBackend;
+    use taladb::rekey;
     use zeroize::Zeroizing;
 
     let correct_key = Zeroizing::new([1u8; 32]);
@@ -306,12 +306,12 @@ fn rekey_wrong_old_key_fails() {
     let new_key = Zeroizing::new([2u8; 32]);
 
     let inner = Arc::new(RedbBackend::open_in_memory().unwrap());
-    let inner_dyn: Arc<dyn taladb_core::StorageBackend> = inner.clone();
-    let enc = Box::new(taladb_core::crypto::EncryptedBackend::new(
+    let inner_dyn: Arc<dyn taladb::StorageBackend> = inner.clone();
+    let enc = Box::new(taladb::crypto::EncryptedBackend::new(
         inner_dyn,
         Zeroizing::new([1u8; 32]),
     ));
-    let db = taladb_core::Database::open_with_backend(enc).unwrap();
+    let db = taladb::Database::open_with_backend(enc).unwrap();
     db.collection("secrets")
         .unwrap()
         .insert(vec![("v".into(), s("hello"))])
@@ -326,8 +326,8 @@ fn rekey_wrong_old_key_fails() {
 
 #[test]
 fn rekey_empty_db_returns_zero() {
-    use taladb_core::engine::RedbBackend;
-    use taladb_core::rekey;
+    use taladb::engine::RedbBackend;
+    use taladb::rekey;
     use zeroize::Zeroizing;
 
     let backend = RedbBackend::open_in_memory().unwrap();
@@ -341,10 +341,10 @@ fn rekey_empty_db_returns_zero() {
 // Field-level encryption on Collection
 // ---------------------------------------------------------------------------
 
-fn field_enc_db() -> (taladb_core::Database, zeroize::Zeroizing<[u8; 32]>) {
+fn field_enc_db() -> (taladb::Database, zeroize::Zeroizing<[u8; 32]>) {
     use zeroize::Zeroizing;
     let key = Zeroizing::new([42u8; 32]);
-    let db = taladb_core::Database::open_in_memory().unwrap();
+    let db = taladb::Database::open_in_memory().unwrap();
     (db, key)
 }
 
@@ -472,7 +472,7 @@ fn field_encryption_survives_snapshot_round_trip() {
     .unwrap();
 
     let bytes = db.export_snapshot().unwrap();
-    let db2 = taladb_core::Database::restore_from_snapshot(&bytes).unwrap();
+    let db2 = taladb::Database::restore_from_snapshot(&bytes).unwrap();
 
     // Open with same field encryption config on the restored db
     let col2 = db2

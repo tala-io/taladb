@@ -70,6 +70,37 @@ pub struct TalaDbConfig {
     /// Storage durability configuration.
     #[serde(default)]
     pub durability: DurabilityConfig,
+    /// Shared decoded search-memory allowance, including active ANN scratch.
+    /// Zero disables retention; short ANN walks share a 64 KiB workspace.
+    #[serde(default)]
+    pub vector_cache_bytes: Option<usize>,
+    /// Host/device memory hint for adaptive sizing. A fixed vector_cache_bytes
+    /// setting takes precedence. Large hints are valid on 32-bit WASM hosts.
+    #[serde(default, deserialize_with = "positive_memory_hint")]
+    pub vector_cache_memory_bytes: Option<u64>,
+}
+
+fn positive_memory_hint<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u64>, D::Error> {
+    let value = Option::<u64>::deserialize(deserializer)?;
+    if value == Some(0) {
+        return Err(serde::de::Error::custom(
+            "vector_cache_memory_bytes must be positive",
+        ));
+    }
+    Ok(value)
+}
+
+impl TalaDbConfig {
+    pub fn apply_vector_cache(&self, db: &crate::Database) -> Result<(), TalaDbError> {
+        if let Some(bytes) = self.vector_cache_bytes {
+            db.set_vector_cache_budget(bytes);
+        } else if let Some(bytes) = self.vector_cache_memory_bytes {
+            db.set_vector_cache_adaptive(Some(bytes))?;
+        }
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -142,6 +173,33 @@ mod tests {
     use super::*;
     use std::io::Write as _;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn adaptive_memory_hints_support_large_hosts_and_fixed_budgets_win() {
+        let db = crate::Database::open_in_memory().unwrap();
+        let config: TalaDbConfig =
+            serde_json::from_str(r#"{"vector_cache_memory_bytes":8589934592}"#).unwrap();
+        config.apply_vector_cache(&db).unwrap();
+        assert_eq!(db.vector_cache_stats().budget_bytes, 16 * 1024 * 1024);
+        let config: TalaDbConfig = serde_json::from_str(
+            r#"{"vector_cache_memory_bytes":8589934592,"vector_cache_bytes":0}"#,
+        )
+        .unwrap();
+        config.apply_vector_cache(&db).unwrap();
+        assert_eq!(db.vector_cache_stats().budget_bytes, 0);
+        assert_eq!(
+            db.vector_cache_stats().policy,
+            crate::VectorCachePolicy::Fixed
+        );
+        for value in ["0", "-1", "1.5", "true"] {
+            assert!(
+                serde_json::from_str::<TalaDbConfig>(&format!(
+                    "{{\"vector_cache_memory_bytes\":{value}}}"
+                ))
+                .is_err()
+            );
+        }
+    }
 
     // ── parse helpers ────────────────────────────────────────────────────────
 

@@ -193,6 +193,35 @@ pub fn tokenize(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// Common English function words, dropped from a ranked search's query when
+/// [`crate::bm25::Bm25Params::stopwords`] is on.
+///
+/// Deliberately short: words that carry almost no meaning in a query and occur
+/// in almost every document. One-letter words never reach here — [`tokenize`]
+/// already drops them. Only queries are filtered; documents are indexed in
+/// full, so the list can change without a reindex.
+pub const STOPWORDS: &[&str] = &[
+    "an", "the", "and", "or", "but", "if", "of", "to", "in", "on", "at", "by", "for", "with",
+    "from", "into", "about", "as", "is", "are", "was", "were", "be", "been", "being", "am", "it",
+    "its", "this", "that", "these", "those", "he", "she", "him", "his", "her", "they", "them",
+    "their", "me", "my", "you", "your", "we", "our", "us", "do", "does", "did", "has", "have",
+    "had", "so", "too", "very", "can", "will", "just", "than", "then", "there", "here", "what",
+    "when", "who", "how", "which", "not",
+];
+
+/// `tokens` without [`STOPWORDS`] — unless that would leave nothing, in which
+/// case they are returned unchanged, so a query made only of stopwords
+/// ("to be") still searches for them rather than returning nothing.
+pub fn without_stopwords(tokens: Vec<String>) -> Vec<String> {
+    if tokens.iter().all(|t| STOPWORDS.contains(&t.as_str())) {
+        return tokens;
+    }
+    tokens
+        .into_iter()
+        .filter(|t| !STOPWORDS.contains(&t.as_str()))
+        .collect()
+}
+
 /// Tokenize and count, returning each distinct token's frequency alongside
 /// the document's total token count.
 ///
@@ -301,6 +330,15 @@ mod tests {
         assert!(tokens.contains(&"taladb".to_string()));
         // "is" has length 2 — kept
         assert!(tokens.contains(&"is".to_string()));
+    }
+
+    #[test]
+    fn stopwords_are_dropped_unless_they_are_all_there_is() {
+        let words = |q: &str| without_stopwords(tokenize(q));
+        assert_eq!(words("kind to a classmate"), vec!["kind", "classmate"]);
+        assert_eq!(words("to be or not"), vec!["to", "be", "or", "not"]);
+        assert_eq!(words("The Fractions"), vec!["fractions"]);
+        assert!(words("").is_empty());
     }
 
     #[test]

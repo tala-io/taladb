@@ -1,5 +1,5 @@
 //! Edge cases, boundary conditions, and regression guards.
-use taladb_core::{Database, Filter, Update, Value};
+use taladb::{Database, Filter, Update, Value};
 
 fn s(v: &str) -> Value {
     Value::Str(v.to_string())

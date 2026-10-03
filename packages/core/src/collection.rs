@@ -16,25 +16,34 @@ use crate::fts::{
     fts_stats_table_name, fts_table_name, token_frequencies, tokenize,
 };
 use crate::index::{
-    CompoundIndexDef, IndexDef, META_COMPOUND_TABLE, META_INDEXES_TABLE, compound_meta_key,
-    compound_table_name, docs_table_name, encode_compound_keys, encode_index_keys,
-    index_table_name, meta_key,
+    CompoundIndexDef, IndexDef, META_COMPOUND_TABLE, META_INDEX_ARRAYS_TABLE, META_INDEXES_TABLE,
+    adjust_index_arrays, compound_meta_key, compound_table_name, docs_table_name,
+    encode_compound_keys, encode_index_keys, index_table_name, meta_key,
 };
 use crate::query::executor::{execute, fetch_documents, index_ordered_entries};
 use crate::query::filter::Filter;
 use crate::query::options::{
-    FindOptions, SortDirection, partial_sort_documents, project_document, sort_documents,
+    FindOptions, SortDirection, exclude_fields, partial_sort_documents, project_document,
+    sort_documents,
 };
 use crate::query::planner::plan_full;
 use crate::time::now_ms;
 use crate::vector::{
-    CachedVectors, HnswOptions, META_HNSW_TABLE, META_VECTOR_TABLE, SharedVectorCache, VectorDef,
-    VectorMetric, VectorSearchResult, decode_f32_vec, encode_f32_vec, value_to_f32_vec,
-    vec_meta_key, vec_table_name,
+    HnswOptions, META_HNSW_TABLE, META_VECTOR_TABLE, VectorDef, VectorMetric, VectorSearchResult,
+    decode_f32_vec, encode_f32_vec, value_to_f32_vec, vec_meta_key, vec_table_name,
 };
 #[path = "vector_api.rs"]
 mod vector_api;
 pub use vector_api::*;
+#[path = "vector_window.rs"]
+mod vector_window;
+
+// Exact search streams anything larger than this: it reuses a decoded vector
+// block or batches reads, which beats building a set. ANN keeps a larger set,
+// scaled with the search budget (one ID per KiB, about 4% of it at HashSet's
+// worst-case footprint), because streaming it needs a doc-to-node lookup per match.
+const VECTOR_FILTER_MIN_IDS: usize = 256;
+const VECTOR_FILTER_BUDGET_BYTES_PER_ID: usize = 1024;
 
 const META_FTS_TABLE: &str = "meta::fts_indexes";
 
@@ -168,11 +177,7 @@ pub struct Collection {
     /// handles from the same `Database` and invalidated by the collection's
     /// write generation (see [`crate::watch`]). Always present because exact
     /// search remains available alongside HNSW on every platform.
-    vector_cache: SharedVectorCache,
-    /// Decoded HNSW nodes, retained across queries and shared with every handle
-    /// from the same `Database`. Keyed by graph table, pinned to the vector
-    /// revision it was read at.
-    node_cache: crate::vector_graph::SharedNodeCache,
+    search_cache: crate::search_cache::SharedSearchCache,
 }
 
 impl Collection {
@@ -185,8 +190,7 @@ impl Collection {
             audit_caller: None,
             #[cfg(feature = "encryption")]
             field_encryption: None,
-            vector_cache: crate::vector::new_shared_vector_cache(),
-            node_cache: crate::vector_graph::new_shared_node_cache(),
+            search_cache: crate::search_cache::new_shared_search_cache(),
         }
     }
 
@@ -229,6 +233,22 @@ impl Collection {
         })
     }
 
+    /// [`Collection::watch`], with each snapshot read through
+    /// [`Collection::find_with_options`] — sorted, paged and projected the same
+    /// way. Projection matters here: a snapshot crosses into the host language
+    /// on every write, so leaving out a large field (an embedding, say) keeps
+    /// each update small.
+    pub fn watch_with_options(
+        &self,
+        filter: Filter,
+        options: FindOptions,
+    ) -> crate::watch::WatchHandle {
+        let reader = self.clone_reader();
+        crate::watch::create_watch(&self.watch_registry, filter, move |f| {
+            reader.find_with_options(f.clone(), options.clone())
+        })
+    }
+
     /// A read-only clone of this handle for watch callbacks: shares the
     /// backend and caches, carries the field-encryption config so snapshots
     /// are decrypted like `find`, but drops audit (it never writes).
@@ -241,8 +261,7 @@ impl Collection {
             audit_caller: None,
             #[cfg(feature = "encryption")]
             field_encryption: self.field_encryption.clone(),
-            vector_cache: Arc::clone(&self.vector_cache),
-            node_cache: Arc::clone(&self.node_cache),
+            search_cache: Arc::clone(&self.search_cache),
         }
     }
 
@@ -286,40 +305,23 @@ impl Collection {
         self
     }
 
-    /// Attach the shared decoded-vector cache (called by `Database::collection()`
-    /// so all handles from the same `Database` share one cache and invalidate
-    /// each other's entries on write).
-    pub(crate) fn with_vector_cache(mut self, cache: SharedVectorCache) -> Self {
-        self.vector_cache = cache;
+    pub(crate) fn with_search_cache(
+        mut self,
+        cache: crate::search_cache::SharedSearchCache,
+    ) -> Self {
+        self.search_cache = cache;
         self
     }
 
-    /// Attach the shared decoded-HNSW-node cache (called by
-    /// `Database::collection()` alongside `with_vector_cache`).
-    pub(crate) fn with_node_cache(mut self, cache: crate::vector_graph::SharedNodeCache) -> Self {
-        self.node_cache = cache;
-        self
+    pub(crate) fn node_cache(&self) -> &crate::search_cache::SharedSearchCache {
+        &self.search_cache
     }
 
-    /// Borrow the shared graph-node cache. `search_vectors` takes the entry out
-    /// for the duration of a query and puts it back, rather than holding the
-    /// lock across the search.
-    pub(crate) fn node_cache(&self) -> &crate::vector_graph::SharedNodeCache {
-        &self.node_cache
-    }
-
-    /// Drop retained graph nodes for a field's graph.
-    ///
-    /// Data writes invalidate through the vector revision, but `create`/`drop`/
-    /// rebuild rewrite the graph without bumping it — the same hole
-    /// `evict_vector_cache` exists to close for the flat path.
     pub(crate) fn evict_node_cache(&self, field: &str) {
-        let table = crate::vector::hnsw_table_name(&self.name, field);
-        let mut cache = self
-            .node_cache
+        self.search_cache
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        cache.remove(&table);
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .evict_field(&self.name, field);
     }
 
     /// Encrypt nominated fields in `doc` in-place, if field encryption is
@@ -471,12 +473,7 @@ impl Collection {
     /// via the write generation, but `create`/`drop_vector_index` rewrite the
     /// vec table without bumping it, so they evict explicitly.
     fn evict_vector_cache(&self, field: &str) {
-        let key = format!("{}::{}", self.name, field);
-        let mut cache = self
-            .vector_cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        cache.remove(&key);
+        self.evict_node_cache(field);
     }
 
     fn load_indexes_in(&self, rtxn: &dyn ReadTxn) -> Result<CachedIndexes, TalaDbError> {
@@ -550,9 +547,11 @@ impl Collection {
         )?;
         let idx_table = index_table_name(&self.name, field);
         let mut keys: Vec<Vec<u8>> = Vec::with_capacity(existing.len());
+        let mut arrays = 0u64;
         for (_, doc_bytes) in existing {
             let doc: Document = postcard::from_bytes(&doc_bytes)?;
             if let Some(val) = doc.get(field) {
+                arrays += u64::from(matches!(val, Value::Array(_)));
                 keys.extend(encode_index_keys(val, doc.id));
             }
         }
@@ -561,6 +560,11 @@ impl Collection {
             .map(|k| crate::engine::KvOp::Put(k.as_slice(), &[]))
             .collect();
         wtxn.apply_batch(&idx_table, &ops)?;
+        wtxn.put(
+            META_INDEX_ARRAYS_TABLE,
+            meta_key.as_bytes(),
+            &arrays.to_le_bytes(),
+        )?;
 
         bump_revision(wtxn.as_mut(), &format!("schema::{}", self.name))?;
         wtxn.commit()?;
@@ -591,6 +595,7 @@ impl Collection {
 
         // Remove metadata
         wtxn.delete(META_INDEXES_TABLE, meta_key.as_bytes())?;
+        wtxn.delete(META_INDEX_ARRAYS_TABLE, meta_key.as_bytes())?;
         bump_revision(wtxn.as_mut(), &format!("schema::{}", self.name))?;
         wtxn.commit()?;
         self.invalidate_index_cache();
@@ -758,7 +763,12 @@ impl Collection {
 
         let tokens = {
             let (freqs, _) = token_frequencies(query);
-            freqs.into_keys().collect::<Vec<_>>()
+            let tokens = freqs.into_keys().collect::<Vec<_>>();
+            if params.stopwords {
+                crate::fts::without_stopwords(tokens)
+            } else {
+                tokens
+            }
         };
         if tokens.is_empty() || top_k == 0 {
             return Ok(vec![]);
@@ -1332,7 +1342,79 @@ impl Collection {
             &cache.fts_indexes,
             &cache.compound_indexes,
         );
-        crate::query::executor::matching_ids(&plan, filter, txn, &self.name)
+        crate::query::executor::matching_ids(
+            &plan,
+            filter,
+            txn,
+            &self.name,
+            &cache.indexes,
+            &cache.compound_indexes,
+        )
+    }
+
+    // Memory pressure lowers the budget and with it this limit.
+    fn ann_filter_id_limit(&self) -> usize {
+        (self
+            .search_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .budget()
+            / VECTOR_FILTER_BUDGET_BYTES_PER_ID)
+            .max(VECTOR_FILTER_MIN_IDS)
+    }
+
+    // At most `limit` IDs are retained by any filter branch or union. Larger
+    // matches switch to a visitor (for ANN, a bitmap charged to the graph loan).
+    fn bounded_vector_ids_in(
+        &self,
+        txn: &dyn ReadTxn,
+        filter: &Filter,
+        limit: usize,
+    ) -> Result<Option<HashSet<[u8; 16]>>, TalaDbError> {
+        let cache = self.load_indexes_in(txn)?;
+        let plan = plan_full(
+            filter,
+            &cache.indexes,
+            &cache.fts_indexes,
+            &cache.compound_indexes,
+        );
+        crate::query::executor::matching_ids_limited(
+            &plan,
+            filter,
+            txn,
+            &self.name,
+            &cache.indexes,
+            &cache.compound_indexes,
+            limit,
+        )
+    }
+
+    fn visit_vector_ids_in(
+        &self,
+        txn: &dyn ReadTxn,
+        filter: &Filter,
+        accept: &mut dyn FnMut([u8; 16]) -> Result<(), TalaDbError>,
+    ) -> Result<(), TalaDbError> {
+        let cache = self.load_indexes_in(txn)?;
+        let plan = if cache.fts_indexes.is_empty() {
+            crate::query::QueryPlan::FullScan
+        } else {
+            plan_full(
+                filter,
+                &cache.indexes,
+                &cache.fts_indexes,
+                &cache.compound_indexes,
+            )
+        };
+        crate::query::executor::visit_matching_ids(
+            &plan,
+            filter,
+            txn,
+            &self.name,
+            &cache.indexes,
+            &cache.compound_indexes,
+            accept,
+        )
     }
 
     fn find_nearest_in(
@@ -1342,10 +1424,9 @@ impl Collection {
         query: &[f32],
         top_k: usize,
         pre_filter: Option<Filter>,
+        options: &VectorQueryOptions,
     ) -> Result<(Vec<VectorSearchResult>, usize), TalaDbError> {
-        use crate::vector::{Candidate, DEFAULT_VECTOR_CACHE_BYTES, VectorBlock};
-        use std::cmp::Reverse;
-        use std::collections::BinaryHeap;
+        use crate::vector::VectorBlock;
         let cache = self.load_indexes_in(txn)?;
         let def = cache
             .vec_indexes
@@ -1376,61 +1457,154 @@ impl Collection {
         let cache_key = vec_meta_key(&self.name, field);
         let allowed = pre_filter
             .as_ref()
-            .map(|f| self.matching_ids_in(txn, f))
-            .transpose()?;
+            .map(|f| self.bounded_vector_ids_in(txn, f, VECTOR_FILTER_MIN_IDS))
+            .transpose()?
+            .flatten();
         if allowed.as_ref().is_some_and(HashSet::is_empty) {
             return Ok((vec![], 0));
         }
         let norm = crate::vector::l2_norm(query);
-        let mut best: BinaryHeap<Reverse<Candidate>> = BinaryHeap::new();
+        let mut ranker = vector_window::Ranker::new(top_k, options);
         let mut computations = 0;
-        let mut score = |id: Ulid, values: &[f32]| {
+        let mut score = |id: Ulid, values: &[f32]| -> Result<(), TalaDbError> {
             if values.len() != query.len() {
-                return;
+                return Ok(());
             }
             computations += 1;
             let similarity = crate::vector::score_with_query_norm(&def.metric, query, norm, values);
-            if !similarity.is_finite() {
-                return;
-            }
-            let candidate = Candidate(id, similarity);
-            if best.len() < top_k {
-                best.push(Reverse(candidate));
-            } else if best.peek().is_some_and(|worst| candidate > worst.0) {
-                best.pop();
-                best.push(Reverse(candidate));
-            }
+            ranker.offer(self, txn, id, similarity)
         };
-        // Selective filters read only their vector IDs and never populate the full cache.
-        if let Some(ids) = allowed {
-            for id in ids {
-                if let Some(bytes) = txn.get(&table, &id)?
-                    && let Some(values) = decode_f32_vec(&bytes)
-                {
-                    score(Ulid::from_bytes(id), &values);
+        // Sparse filters batch point reads in key order. Dense filters use an
+        // existing decoded block or one contiguous scan, decoding only matches.
+        // Filtered reads never populate the full-vector cache.
+        if let Some(filter) = &pre_filter
+            && allowed.is_none()
+        {
+            let cached = self
+                .search_cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .vectors(&cache_key, generation);
+            if let Some(block) = cached {
+                // Blocks are built by ordered scans. Reuse their vectors without
+                // building an ID map or copying a collection-sized block.
+                self.visit_vector_ids_in(txn, filter, &mut |id| {
+                    let id = Ulid::from_bytes(id);
+                    if let Ok(i) = block.ids.binary_search(&id) {
+                        let start = i * block.dimensions;
+                        score(id, &block.values[start..start + block.dimensions])?;
+                    }
+                    Ok(())
+                })?;
+            } else {
+                let chunk_size = (64 * 1024 / def.dimensions.saturating_mul(4)).clamp(1, 256);
+                let mut keys = Vec::with_capacity(chunk_size);
+                let mut flush = |keys: &mut Vec<[u8; 16]>| -> Result<(), TalaDbError> {
+                    crate::query::key_batch::visit(txn, &table, keys, &mut |id, bytes| {
+                        if let Some(values) = decode_f32_vec(bytes) {
+                            score(Ulid::from_bytes(*id), &values)?;
+                        }
+                        Ok(())
+                    })
+                };
+                self.visit_vector_ids_in(txn, filter, &mut |id| {
+                    keys.push(id);
+                    if keys.len() == chunk_size {
+                        flush(&mut keys)?;
+                    }
+                    Ok(())
+                })?;
+                if !keys.is_empty() {
+                    flush(&mut keys)?;
+                }
+            }
+        } else if let Some(ids) = allowed {
+            let count = usize::try_from(txn.count_entries(&table)?).unwrap_or(usize::MAX);
+            if ids.len() <= count / 8 {
+                let mut keys: Vec<_> = ids.into_iter().collect();
+                keys.sort_unstable();
+                // Bound batched copies by roughly 64 KiB, except when one
+                // vector alone is larger. Table opens amortise across the batch.
+                let chunk_size = (64 * 1024 / def.dimensions.saturating_mul(4)).clamp(1, 256);
+                for chunk in keys.chunks(chunk_size) {
+                    let refs: Vec<_> = chunk.iter().map(<[u8; 16]>::as_slice).collect();
+                    for (id, bytes) in chunk.iter().zip(txn.get_many(&table, &refs)?) {
+                        if let Some(bytes) = bytes
+                            && let Some(values) = decode_f32_vec(&bytes)
+                        {
+                            score(Ulid::from_bytes(*id), &values)?;
+                        }
+                    }
+                }
+            } else {
+                let cached = self
+                    .search_cache
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .vectors(&cache_key, generation);
+                if let Some(block) = cached {
+                    for (id, values) in block
+                        .ids
+                        .iter()
+                        .zip(block.values.chunks_exact(block.dimensions))
+                    {
+                        if ids.contains(&id.to_bytes()) {
+                            score(*id, values)?;
+                        }
+                    }
+                } else {
+                    txn.scan(
+                        &table,
+                        std::ops::Bound::Unbounded,
+                        std::ops::Bound::Unbounded,
+                        &mut |key, bytes| {
+                            if let Ok(id) = <[u8; 16]>::try_from(key)
+                                && ids.contains(&id)
+                                && let Some(values) = decode_f32_vec(bytes)
+                            {
+                                score(Ulid::from_bytes(id), &values)?;
+                            }
+                            Ok(crate::engine::ScanFlow::Continue)
+                        },
+                    )?;
                 }
             }
         } else {
-            let cached = self
-                .vector_cache
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .get(&cache_key)
-                .filter(|c| c.generation == generation)
-                .map(|c| Arc::clone(&c.vectors));
+            let (cached, budget, epoch) = {
+                let mut cache = self
+                    .search_cache
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                (
+                    cache.vectors(&cache_key, generation),
+                    cache.budget(),
+                    cache.epoch,
+                )
+            };
             if let Some(block) = cached {
                 for (id, values) in block
                     .ids
                     .iter()
                     .zip(block.values.chunks_exact(block.dimensions))
                 {
-                    score(*id, values);
+                    score(*id, values)?;
                 }
             } else {
                 let count = usize::try_from(txn.count_entries(&table)?).unwrap_or(usize::MAX);
                 let estimate =
                     count.checked_mul(def.dimensions.saturating_mul(4).saturating_add(16));
-                let retain = estimate.is_some_and(|n| n <= DEFAULT_VECTOR_CACHE_BYTES);
+                // Reserve before decoding a full block. Concurrent exact
+                // queries that cannot claim space simply stream the table.
+                let mut reservation =
+                    estimate
+                        .filter(|&n| n <= budget && budget > 0)
+                        .and_then(|n| {
+                            self.search_cache
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .reserve(n)
+                        });
+                let retain = reservation.is_some();
                 let mut block = VectorBlock {
                     dimensions: def.dimensions,
                     ..Default::default()
@@ -1450,7 +1624,7 @@ impl Collection {
                             && let Some(values) = decode_f32_vec(bytes)
                             && values.len() == def.dimensions
                         {
-                            score(Ulid::from_bytes(id), &values);
+                            score(Ulid::from_bytes(id), &values)?;
                             if retain {
                                 block.ids.push(Ulid::from_bytes(id));
                                 block.values.extend(values);
@@ -1459,33 +1633,17 @@ impl Collection {
                         Ok(crate::engine::ScanFlow::Continue)
                     },
                 )?;
-                if retain && block.bytes() <= DEFAULT_VECTOR_CACHE_BYTES {
+                if retain && block.bytes() <= reservation.as_ref().unwrap().bytes {
                     let mut cache = self
-                        .vector_cache
+                        .search_cache
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let used: usize = cache.values().map(|c| c.vectors.bytes()).sum();
-                    if used.saturating_add(block.bytes()) > DEFAULT_VECTOR_CACHE_BYTES {
-                        cache.clear();
-                    }
-                    if cache
-                        .get(&cache_key)
-                        .is_none_or(|c| c.generation <= generation)
-                    {
-                        cache.insert(
-                            cache_key,
-                            CachedVectors {
-                                generation,
-                                vectors: Arc::new(block),
-                            },
-                        );
-                    }
+                    drop(reservation.take());
+                    cache.insert_vectors(&cache_key, generation, block, epoch);
                 }
             }
         }
-        let mut ranked: Vec<_> = best.into_iter().map(|r| r.0).collect();
-        ranked.sort_unstable_by(|a, b| b.cmp(a));
-        self.load_results_in(txn, ranked.into_iter().map(|c| (c.0, c.1)).collect())
+        self.load_results_in(txn, ranker.ranked())
             .map(|rows| (rows, computations))
     }
 
@@ -1500,9 +1658,21 @@ impl Collection {
         rtxn: &dyn ReadTxn,
         scored: Vec<(ulid::Ulid, f32)>,
     ) -> Result<Vec<VectorSearchResult>, TalaDbError> {
+        self.load_results_limited_in(rtxn, scored, None)
+    }
+
+    pub(super) fn load_results_limited_in(
+        &self,
+        rtxn: &dyn ReadTxn,
+        scored: Vec<(ulid::Ulid, f32)>,
+        limit: Option<usize>,
+    ) -> Result<Vec<VectorSearchResult>, TalaDbError> {
         let docs_table = docs_table_name(&self.name);
-        let mut results = Vec::with_capacity(scored.len());
+        let mut results = Vec::with_capacity(limit.map_or(scored.len(), |n| n.min(scored.len())));
         for (id, score) in scored {
+            if limit.is_some_and(|n| results.len() >= n) {
+                break;
+            }
             if let Some(bytes) = rtxn.get(&docs_table, &id.to_bytes())? {
                 let mut document: Document = postcard::from_bytes(&bytes)?;
                 // Match `find`: encrypted fields come back as plaintext.
@@ -1632,6 +1802,8 @@ impl Collection {
 
         // --- secondary indexes ---
         for (idx, table) in cache.indexes.iter().zip(&tables.btree) {
+            let mut removed = 0u64;
+            let mut added = 0u64;
             let mut keys: Vec<(Vec<u8>, bool)> = Vec::new(); // (key, is_delete)
             for (doc, old_doc) in docs {
                 if unchanged(doc, old_doc.as_ref(), &idx.field) {
@@ -1640,6 +1812,7 @@ impl Collection {
                 if let Some(old) = old_doc
                     && let Some(old_val) = old.get(&idx.field)
                 {
+                    removed += u64::from(matches!(old_val, Value::Array(_)));
                     keys.extend(
                         encode_index_keys(old_val, old.id)
                             .into_iter()
@@ -1647,6 +1820,7 @@ impl Collection {
                     );
                 }
                 if let Some(new_val) = doc.get(&idx.field) {
+                    added += u64::from(matches!(new_val, Value::Array(_)));
                     keys.extend(
                         encode_index_keys(new_val, doc.id)
                             .into_iter()
@@ -1654,6 +1828,8 @@ impl Collection {
                     );
                 }
             }
+            // Count empty/unindexable arrays even when no key was produced.
+            adjust_index_arrays(wtxn, &self.name, &idx.field, removed, added)?;
             if keys.is_empty() {
                 continue;
             }
@@ -2004,7 +2180,7 @@ impl Collection {
     /// 2. Sort (`options.sort`)
     /// 3. Skip (`options.skip`)
     /// 4. Limit (`options.limit`)
-    /// 5. Projection (`options.fields`)
+    /// 5. Projection (`options.fields`, then `options.exclude`)
     #[tracing::instrument(skip(self, filter, options), fields(collection = %self.name))]
     pub fn find_with_options(
         &self,
@@ -2075,6 +2251,12 @@ impl Collection {
             docs = docs
                 .into_iter()
                 .map(|d| project_document(d, fields))
+                .collect();
+        }
+        if let Some(ref exclude) = options.exclude {
+            docs = docs
+                .into_iter()
+                .map(|d| exclude_fields(d, exclude))
                 .collect();
         }
 
@@ -2534,6 +2716,11 @@ impl Collection {
         wtxn.apply_batch(&tables.docs, &body_ops)?;
 
         for (idx, table) in cache.indexes.iter().zip(&tables.btree) {
+            let removed = docs
+                .iter()
+                .filter(|d| matches!(d.get(&idx.field), Some(Value::Array(_))))
+                .count() as u64;
+            adjust_index_arrays(wtxn, &self.name, &idx.field, removed, 0)?;
             let keys: Vec<Vec<u8>> = docs
                 .iter()
                 .filter_map(|doc| {

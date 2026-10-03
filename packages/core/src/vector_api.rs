@@ -13,6 +13,16 @@ use serde_json::{Value as Json, json};
     deny_unknown_fields
 )]
 enum Command {
+    CacheStats,
+    CacheBudget {
+        bytes: usize,
+    },
+    CacheAdaptive {
+        memory_bytes: Option<u64>,
+    },
+    MemoryPressure {
+        level: crate::MemoryPressure,
+    },
     Create {
         field: String,
         dimensions: usize,
@@ -145,6 +155,36 @@ impl Collection {
                 .transpose()
         };
         Ok(match command {
+            Command::CacheStats => json!(
+                self.node_cache()
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .stats()
+            ),
+            Command::CacheBudget { bytes } => {
+                let mut cache = self
+                    .node_cache()
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                cache.set_budget(bytes);
+                json!(cache.stats())
+            }
+            Command::CacheAdaptive { memory_bytes } => {
+                let mut cache = self
+                    .node_cache()
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                cache.set_adaptive(memory_bytes)?;
+                json!(cache.stats())
+            }
+            Command::MemoryPressure { level } => {
+                let mut cache = self
+                    .node_cache()
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                cache.notify_pressure(level);
+                json!(cache.stats())
+            }
             Command::Create {
                 field,
                 dimensions,
@@ -301,21 +341,45 @@ impl Collection {
         let rev = revision(&WriteView(txn), &table)?;
         self.drop_graph_in(txn, &def.field)?;
         let mut h = Header::new(
-            format!("hnsw::{key}::a"),
+            format!("hnsw::{key}::{}", Ulid::new()),
             rev,
             options,
             def.dimensions,
             def.metric,
         );
-        for (id, bytes) in txn.range(
-            &table,
-            std::ops::Bound::Unbounded,
-            std::ops::Bound::Unbounded,
-        )? {
-            let id = <[u8; 16]>::try_from(id.as_slice())
-                .map_err(|_| invalid("invalid stored vector ID"))?;
-            let v = decode_f32_vec(&bytes).ok_or_else(|| invalid("invalid stored vector bytes"))?;
-            graph::insert(txn, &mut h, id, &v)?;
+        // Read bounded batches before borrowing the write transaction for graph
+        // edits. A whole-index `range` otherwise duplicates every stored vector.
+        let budget = self
+            .node_cache()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .budget();
+        let mut cache = graph::NodeCache::with_budget(budget);
+        let mut last: Option<Vec<u8>> = None;
+        loop {
+            let mut batch = Vec::with_capacity(128);
+            let start = last
+                .as_deref()
+                .map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded);
+            WriteView(txn).scan(&table, start, std::ops::Bound::Unbounded, &mut |k, v| {
+                batch.push((k.to_vec(), v.to_vec()));
+                Ok(if batch.len() == 128 {
+                    ScanFlow::Stop
+                } else {
+                    ScanFlow::Continue
+                })
+            })?;
+            if batch.is_empty() {
+                break;
+            }
+            for (id, bytes) in batch {
+                let doc = <[u8; 16]>::try_from(id.as_slice())
+                    .map_err(|_| invalid("invalid stored vector ID"))?;
+                let v =
+                    decode_f32_vec(&bytes).ok_or_else(|| invalid("invalid stored vector bytes"))?;
+                graph::insert_cached(txn, &mut h, doc, &v, &mut cache)?;
+                last = Some(id);
+            }
         }
         self.publish_graph_in(txn, &key, &h)
     }
@@ -391,18 +455,8 @@ impl Collection {
         };
         self.build_graph_in(txn.as_mut(), &def, options)?;
         txn.commit()?;
-        // A rebuild rewrites links (and renumbers nodes when it compacts
-        // tombstones) while leaving the vector revision untouched, so the
-        // revision tag alone would let a cache outlive the graph it describes.
-        //
-        // This is a recall guard, not a correctness one, and the difference is
-        // worth stating: the ANN loop above rescores every returned id against
-        // the vector table in the current snapshot, so a stale graph can only
-        // change *which* candidates are considered, never their scores and never
-        // whether a deleted document can surface. Attempts to produce a wrong
-        // answer from a stale cache here did not manage it — HNSW still lands on
-        // good neighbours through slightly wrong links. Evicting is cheap and
-        // keeps recall tied to the graph that is actually on disk.
+        // Every replacement has a unique table identity, even when vectors do
+        // not change. Evict retained predecessors and invalidate active loans.
         self.evict_node_cache(field);
         Ok(())
     }
@@ -480,15 +534,9 @@ impl Collection {
         let vtable = vec_table_name(&self.name, field);
         let rev = revision(&view, &vtable)?;
         let id = Ulid::new().to_string();
-        let active = graph::header(&view, &key)?;
-        let slot = if active.is_some_and(|h| h.table.ends_with("::a")) {
-            "b"
-        } else {
-            "a"
-        };
         let build = Build {
             progress: VectorBuildProgress {
-                id,
+                id: id.clone(),
                 state: "building".into(),
                 processed: 0,
                 total: view.count_entries(&vtable)?,
@@ -496,7 +544,7 @@ impl Collection {
                 error: None,
             },
             header: Header::new(
-                format!("hnsw::{key}::{slot}"),
+                format!("hnsw::{key}::{id}"),
                 rev,
                 options,
                 def.dimensions,
@@ -557,21 +605,29 @@ impl Collection {
                 "vector build changed concurrently; read its status before resuming",
             ));
         }
+        let shared = self.node_cache();
+        let mut lease = None;
         if revision(&WriteView(txn.as_ref()), &vtable)? != build.progress.revision {
             build.progress.state = "failed".into();
             build.progress.error =
                 Some("vectors changed during the build; restart the build".into());
             txn.delete_table(&build.header.table)?;
         } else {
+            let cache = lease.insert(graph::CacheLease::take_for_build(
+                shared,
+                &build.header.table,
+                build.progress.processed,
+            ));
             for (key, bytes) in batch {
                 let vector =
                     decode_f32_vec(&bytes).ok_or_else(|| invalid("invalid stored vector"))?;
-                graph::insert(
+                graph::insert_cached(
                     txn.as_mut(),
                     &mut build.header,
                     <[u8; 16]>::try_from(key.as_slice())
                         .map_err(|_| invalid("invalid stored vector ID"))?,
                     &vector,
+                    cache.cache_mut(),
                 )?;
                 build.last = Some(key);
                 build.progress.processed += 1;
@@ -590,6 +646,18 @@ impl Collection {
             &postcard::to_allocvec(&build)?,
         )?;
         txn.commit()?;
+        if build.progress.state == "ready" {
+            self.evict_node_cache(field);
+        } else if build.progress.state == "building" {
+            if let Some(lease) = &mut lease {
+                lease.committed_build(build.progress.processed);
+            }
+        } else {
+            shared
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .evict_graph(&build.header.table);
+        }
         Ok(build.progress)
     }
     pub fn cancel_vector_build(
@@ -616,6 +684,12 @@ impl Collection {
             )?;
         }
         txn.commit()?;
+        if build.progress.state == "cancelled" {
+            self.node_cache()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .evict_graph(&build.header.table);
+        }
         Ok(build.progress)
     }
     pub fn search_vectors(
@@ -702,11 +776,20 @@ impl Collection {
         let allowed = if ann {
             filter
                 .as_ref()
-                .map(|f| self.matching_ids_in(txn, f))
+                .map(|f| self.bounded_vector_ids_in(txn, f, self.ann_filter_id_limit()))
                 .transpose()?
+                .flatten()
         } else {
             None
         };
+        if allowed.as_ref().is_some_and(HashSet::is_empty) {
+            return Ok(VectorQueryResult {
+                hits: vec![],
+                execution,
+                next_offset: None,
+            });
+        }
+        let mut eligible = allowed.as_ref().map_or(count, |ids| ids.len().min(count));
         let mut rows;
         if ann {
             let h = h.as_ref().unwrap();
@@ -719,24 +802,68 @@ impl Collection {
             // One cache for the whole retry sequence — see `graph::search` — and
             // now for the whole process: the lease takes it out of the shared
             // map and returns it on every exit path, including the error ones.
-            // Taking it out rather than holding the lock keeps concurrent
-            // queries from serialising on one graph; the worst case is two
-            // queries both decoding and the last one winning, which is a cache
-            // miss, not a wrong answer.
+            // Active loans reserve shared memory without holding the mutex.
+            // A concurrent walk without enough space uses exact search instead
+            // of allocating a second full graph cache.
             //
-            // `h.revision` is the vector-table revision this graph was built
-            // against, and the `ready` check above already refused to run ANN
-            // unless it matches the table's current revision — so a cache tagged
-            // with the same revision cannot hold nodes from a different graph.
+            // The unique table identity pins the loan to this graph generation;
+            // revision additionally pins it to the vectors in this snapshot.
             let mut lease = graph::CacheLease::take(self.node_cache(), &h.table, h.revision);
+            let mask = if filter.is_some() && allowed.is_none() {
+                match graph::filter_mask(txn, h, &mut lease, |accept| {
+                    self.visit_vector_ids_in(txn, filter.as_ref().unwrap(), accept)
+                }) {
+                    Ok(mask) => {
+                        eligible = mask.count;
+                        Some(mask)
+                    }
+                    Err(TalaDbError::SearchMemoryLimit) => {
+                        drop(lease);
+                        return self
+                            .exact_memory_fallback_in(txn, field, query, top_k, filter, options);
+                    }
+                    Err(error) => return Err(error),
+                }
+            } else {
+                None
+            };
+            if eligible == 0 {
+                return Ok(VectorQueryResult {
+                    hits: vec![],
+                    execution,
+                    next_offset: None,
+                });
+            }
+            let eligibility = if let Some(mask) = &mask {
+                graph::Eligibility::Mask(&mask.bits)
+            } else if let Some(ids) = &allowed {
+                graph::Eligibility::Ids(ids)
+            } else {
+                graph::Eligibility::All
+            };
             loop {
                 let (ids, distances) =
-                    graph::search(txn, h, query, ef, allowed.as_ref(), lease.cache_mut())?;
+                    match graph::search(txn, h, query, ef, eligibility, lease.cache_mut()) {
+                        Ok(result) => result,
+                        Err(TalaDbError::SearchMemoryLimit) => {
+                            // The query-owned bitmap is charged to this loan.
+                            drop(mask);
+                            drop(lease);
+                            drop(allowed);
+                            return self.exact_memory_fallback_in(
+                                txn, field, query, top_k, filter, options,
+                            );
+                        }
+                        Err(error) => return Err(error),
+                    };
                 execution.distance_computations += distances;
                 execution.ef_search = Some(ef);
                 // Exact rescoring always reads the original f32 vector from the
                 // same snapshot as the graph, filter, and returned document.
-                let mut ranked = Vec::with_capacity(ids.len());
+                let mut ranked = Vec::new();
+                let mut grouped = options.group_by.as_ref().map(|_| {
+                    vector_window::Ranker::new(wanted.saturating_add(1).min(count), options)
+                });
                 let query_norm = crate::vector::l2_norm(query);
                 for id in ids {
                     if let Some(bytes) = txn.get(&table, &id)?
@@ -750,28 +877,39 @@ impl Collection {
                             &v,
                         );
                         if score.is_finite() {
-                            ranked.push((Ulid::from_bytes(id), score));
+                            if let Some(window) = &mut grouped {
+                                window.offer(self, txn, Ulid::from_bytes(id), score)?;
+                            } else {
+                                ranked.push((Ulid::from_bytes(id), score));
+                            }
                         }
                     }
                 }
-                ranked.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
-                rows = self.load_results_in(txn, ranked)?;
+                if let Some(window) = grouped {
+                    ranked = window.ranked();
+                } else {
+                    ranked.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+                }
+                if let Some(threshold) = options.score_threshold {
+                    ranked.retain(|r| r.1 >= threshold);
+                }
+                let limit = options
+                    .group_by
+                    .is_none()
+                    .then_some(wanted.saturating_add(1));
+                rows = self.load_results_limited_in(txn, ranked, limit)?;
                 Self::reduce_vector_rows(&mut rows, options)?;
-                if rows.len() >= wanted || ef >= count {
+                if rows.len() >= wanted.min(eligible) || ef >= count {
                     break;
                 }
                 ef = ef.saturating_mul(2).min(count);
             }
         } else {
-            // Grouping must see all candidates before truncation: simply
-            // grouping a top-k list loses less frequent parent entities.
-            let pool = if options.group_by.is_some() {
-                count
-            } else {
-                wanted.saturating_add(1).min(count)
-            };
+            // Quotas are applied while scoring. Only the page window is kept,
+            // rather than sorting and loading all documents before grouping.
+            let pool = wanted.saturating_add(1).min(count);
             (rows, execution.distance_computations) =
-                self.find_nearest_in(txn, field, query, pool, filter)?;
+                self.find_nearest_in(txn, field, query, pool, filter, options)?;
             Self::reduce_vector_rows(&mut rows, options)?;
         }
         let next_offset = (rows.len() > wanted).then_some(options.offset.saturating_add(top_k));
@@ -781,6 +919,22 @@ impl Collection {
             execution,
             next_offset,
         })
+    }
+    fn exact_memory_fallback_in(
+        &self,
+        txn: &dyn ReadTxn,
+        field: &str,
+        query: &[f32],
+        top_k: usize,
+        filter: Option<Filter>,
+        options: &VectorQueryOptions,
+    ) -> Result<VectorQueryResult, TalaDbError> {
+        let mut exact_options = options.clone();
+        exact_options.mode = VectorSearchMode::Exact;
+        let mut result =
+            self.search_vectors_in(txn, field, query, top_k, filter, &exact_options)?;
+        result.execution.reason = "memoryBudget".into();
+        Ok(result)
     }
     fn reduce_vector_rows(
         rows: &mut Vec<VectorSearchResult>,

@@ -11,8 +11,8 @@
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
-use taladb_core::vector::{VectorMetric, l2_norm, score_with_query_norm};
-use taladb_core::{Database, Filter, Value};
+use taladb::vector::{VectorMetric, l2_norm, score_with_query_norm};
+use taladb::{Database, Filter, Value};
 
 /// Deterministic pseudo-random vectors: a benchmark that reseeds differently on
 /// each run cannot be compared against its own baseline.

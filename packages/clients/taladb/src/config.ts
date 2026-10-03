@@ -31,6 +31,11 @@ export interface DurabilityConfig {
 
 /** Top-level TalaDB configuration. */
 export interface TalaDbConfig {
+  /** Shared decoded search allowance in bytes, including active ANN scratch.
+   * Zero disables retention; short walks share a 64 KiB workspace. */
+  vector_cache_bytes?: number;
+  /** Device/host memory hint in bytes for adaptive sizing; fixed budgets take precedence. */
+  vector_cache_memory_bytes?: number;
   /** Outbound change-webhook configuration. Disabled by default. */
   webhook?: WebhookConfig;
   /** Storage durability configuration. */
@@ -49,7 +54,13 @@ export interface TalaDbConfig {
  * through this loader — is validated by exactly the same rules.
  */
 export function validateConfig(config: TalaDbConfig): void {
+  if (config.vector_cache_memory_bytes !== undefined && (!Number.isSafeInteger(config.vector_cache_memory_bytes) || config.vector_cache_memory_bytes <= 0)) {
+    throw new Error("TalaDB config: vector_cache_memory_bytes must be a positive safe integer");
+  }
   if (config.webhook) validateWebhookConfig(config.webhook);
+  if (config.vector_cache_bytes !== undefined && (!Number.isSafeInteger(config.vector_cache_bytes) || config.vector_cache_bytes < 0)) {
+    throw new Error("TalaDB config: vector_cache_bytes must be a nonnegative safe integer");
+  }
 }
 
 // ---------------------------------------------------------------------------

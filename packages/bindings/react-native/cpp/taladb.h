@@ -7,7 +7,7 @@
  *
  * This is the stable C interface of the Rust taladb-ffi crate. Its consumers
  * are the React Native JSI HostObject and TurboModule in this repository and
- * the native Swift (tala-io/taladb-swift) and Kotlin (tala-io/taladb-kotlin)
+ * the native Swift (taladb/taladb-swift) and Kotlin (taladb/taladb-kotlin)
  * packages, which ship as separate repositories.
  *
  * Compatibility
@@ -45,9 +45,9 @@
  *
  * - 1 — through 0.11.8.
  * - 2 — the six index create/drop functions return `int32_t` instead of
- *   `void`; `taladb_call`, `taladb_ffi_abi_version` and the live-query
- *   functions (`taladb_watch`, `taladb_watch_next`, `taladb_watch_close`)
- *   added.
+ *   `void`; `taladb_call`, `taladb_ffi_abi_version`, `taladb_last_error_code`
+ *   and the live-query functions (`taladb_watch`, `taladb_watch_next`,
+ *   `taladb_watch_close`, `taladb_watch_with_options`) added.
  */
 #define TALADB_FFI_ABI_VERSION 2
 
@@ -79,6 +79,19 @@ extern "C" {
  * Do NOT free the returned string.
  */
 const char *taladb_last_error(void);
+
+/**
+ * The engine's stable code for the error [`taladb_last_error`] describes —
+ * `"Encryption"` for a wrong passphrase, `"InvalidFilter"`, `"DuplicateId"`,
+ * and the rest of `TalaDbError::code` — or NULL when the last call succeeded
+ * or failed outside the engine (a null pointer, malformed arguments).
+ *
+ * Codes are a public contract shared with the JavaScript bindings' `error.code`:
+ * new ones may be added, an existing one never changes meaning. Read it in the
+ * same native call as the message; like the message, it is thread-local.
+ * The returned string is static. Do NOT free it.
+ */
+const char *taladb_last_error_code(void);
 
 /**
  * The [`TALADB_FFI_ABI_VERSION`] this library was built with.
@@ -442,6 +455,23 @@ char *taladb_call(struct TalaDbHandle *handle, const char *op, const char *args_
 struct TalaDbWatch *taladb_watch(struct TalaDbHandle *handle,
                                  const char *collection,
                                  const char *filter_json);
+
+/**
+ * [`taladb_watch`], with each snapshot projected like `find`'s options:
+ * `{"fields": [..]}` keeps only those fields, `{"exclude": [..]}` drops them.
+ * A NULL or `"null"` `options_json` is the same as `taladb_watch`.
+ *
+ * Every write sends a fresh snapshot across to the caller, so excluding a
+ * large field the caller does not display (an embedding) keeps each update
+ * small.
+ *
+ * # Safety
+ * As for [`taladb_watch`]; `options_json` may be NULL.
+ */
+struct TalaDbWatch *taladb_watch_with_options(struct TalaDbHandle *handle,
+                                              const char *collection,
+                                              const char *filter_json,
+                                              const char *options_json);
 
 /**
  * Wait up to `timeout_ms` for a write to the watched collection.

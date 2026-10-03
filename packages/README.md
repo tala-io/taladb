@@ -4,7 +4,7 @@ Grouped by role. The dependency direction is one-way: **core** ← **bindings** 
 
 | Folder | Role | Contents |
 |---|---|---|
-| `core/` | **The engine** | `taladb-core` — pure Rust: document model, indexes, vector search, query planner, storage. No JS bindings. |
+| `core/` | **The engine** | `taladb` crate (published to crates.io) — pure Rust: document model, indexes, vector search, query planner, storage. No JS bindings. |
 | `bindings/` | **Runtime wrappers over core** | `node/` (napi → `@taladb/node`), `web/` (wasm → `@taladb/web`), `react-native/` (JSI → `@taladb/react-native`). Rust + JS hybrids. |
 | `clients/` | **What apps import** | `taladb/` (unified meta-package → `taladb`), `react/` (→ `@taladb/react`). Pure TypeScript. |
 | `adapters/` | **Sync adapters** | `mongodb/` (→ `@taladb/sync-mongodb`). Pure TypeScript. Implement the `SyncAdapter` interface from `taladb`. |

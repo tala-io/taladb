@@ -94,7 +94,7 @@ export default defineConfig({
   },
 
   themeConfig: {
-    logo: { src: "/logo.svg", alt: "TalaDB" },
+    logo: { light: "/logo.svg", dark: "/logo-dark.svg", alt: "TalaDB" },
     siteTitle: false,
 
     nav: [
@@ -106,19 +106,19 @@ export default defineConfig({
         text: "Live Demo",
         items: [
           { text: "Web Demo", link: "https://demo-web.taladb.dev/" },
-          { text: "Mobile Demo", link: "https://appetize.io/app/b_ugmjhjghdkgnjux4lzkepvsfma" },
+          { text: "Mobile Demo", link: "https://play.google.com/store/apps/details?id=dev.thinkgrid.kepta" },
         ],
       },
       {
-        text: "v0.11.9",
+        text: "v0.12.0",
         items: [
           {
             text: "Changelog",
-            link: "https://github.com/tala-io/taladb/releases",
+            link: "https://github.com/taladb/taladb/releases",
           },
           {
             text: "Contributing",
-            link: "https://github.com/tala-io/taladb/blob/main/CONTRIBUTING.md",
+            link: "https://github.com/taladb/taladb/blob/main/CONTRIBUTING.md",
           },
           {
             text: "npm",
@@ -145,7 +145,9 @@ export default defineConfig({
           { text: "React Native", link: "/guide/react-native" },
           { text: "Android (Kotlin) · early", link: "/guide/android" },
           { text: "iOS & macOS (Swift) · early", link: "/guide/swift" },
+          { text: "Rust · early", link: "/guide/rust" },
           { text: "CLI Dev Tools", link: "/guide/cli" },
+          { text: "Vector Benchmarks", link: "/guide/vector-benchmarks" },
         ],
       },
       {
@@ -178,7 +180,7 @@ export default defineConfig({
     ],
 
     socialLinks: [
-      { icon: "github", link: "https://github.com/tala-io/taladb" },
+      { icon: "github", link: "https://github.com/taladb/taladb" },
       { icon: "heart", link: "https://github.com/sponsors/tala-sh" },
     ],
 
@@ -187,8 +189,8 @@ export default defineConfig({
         <a href="/introduction">Docs</a> ·
         <a href="https://www.npmjs.com/package/taladb" target="_blank" rel="noopener">npm</a> ·
         <a href="/roadmap">Roadmap</a> ·
-        <a href="https://github.com/tala-io/taladb/discussions" target="_blank" rel="noopener">Discussions</a> ·
-        <a href="https://github.com/tala-io/taladb/releases" target="_blank" rel="noopener">Changelog</a> ·
+        <a href="https://github.com/taladb/taladb/discussions" target="_blank" rel="noopener">Discussions</a> ·
+        <a href="https://github.com/taladb/taladb/releases" target="_blank" rel="noopener">Changelog</a> ·
         <a href="https://github.com/sponsors/tala-sh" target="_blank" rel="noopener">Sponsor</a>
         <br/>Released under the Apache License 2.0.
       `,
@@ -196,7 +198,7 @@ export default defineConfig({
     },
 
     editLink: {
-      pattern: "https://github.com/tala-io/taladb/edit/main/docs/:path",
+      pattern: "https://github.com/taladb/taladb/edit/main/docs/:path",
       text: "Edit this page on GitHub",
     },
 

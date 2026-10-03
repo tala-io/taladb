@@ -8,6 +8,9 @@ repository.workspace = true
 homepage.workspace = true
 rust-version.workspace = true
 description = "TalaDB C FFI — the stable C interface used by the React Native, Swift and Kotlin bindings"
+# Not published: crates.io carries only the `taladb` crate (packages/core).
+# This crate is built and shipped through its own channel.
+publish = false
 
 [lints]
 workspace = true
@@ -29,7 +32,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 fuzzing = []
 
 [dependencies]
-taladb-core = { path = "../../core", default-features = false, features = ["encryption", "legacy-migration", "vector-hnsw"] }
+taladb-core = { package = "taladb", path = "../../core", default-features = false, features = ["encryption", "legacy-migration", "vector-hnsw"] }
 serde_json   = "1.0"
 
 [dev-dependencies]

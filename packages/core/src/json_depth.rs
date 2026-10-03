@@ -73,7 +73,7 @@ pub const MAX_JSON_DEPTH: usize = 64;
 /// # Examples
 ///
 /// ```
-/// use taladb_core::json_depth::{MAX_JSON_DEPTH, check_json_depth};
+/// use taladb::json_depth::{MAX_JSON_DEPTH, check_json_depth};
 ///
 /// let shallow = serde_json::json!({ "a": [1, { "b": 2 }] });
 /// assert!(check_json_depth(&shallow).is_ok());

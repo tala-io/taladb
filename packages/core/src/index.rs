@@ -217,6 +217,56 @@ pub fn ulid_from_index_key(key: &[u8]) -> Option<Ulid> {
     Some(Ulid::from_bytes(bytes))
 }
 
+/// Decode one value prefix, leaving subsequent compound fields unconsumed.
+pub(crate) fn decode_value_prefix(bytes: &[u8]) -> Option<(Value, &[u8])> {
+    let (&tag, rest) = bytes.split_first()?;
+    match tag {
+        0x00 => Some((Value::Null, rest)),
+        0x10 | 0x11 => Some((Value::Bool(tag == 0x11), rest)),
+        TAG_INT | TAG_FLOAT => {
+            let word = u64::from_be_bytes(rest.get(..8)?.try_into().ok()?);
+            let value = if tag == TAG_INT {
+                Value::Int((word ^ 0x8000_0000_0000_0000) as i64)
+            } else {
+                let bits = if word >> 63 == 1 {
+                    word ^ 0x8000_0000_0000_0000
+                } else {
+                    !word
+                };
+                Value::Float(f64::from_bits(bits))
+            };
+            Some((value, &rest[8..]))
+        }
+        0x40 | 0x50 => {
+            let mut value = Vec::new();
+            let mut rest = rest;
+            loop {
+                let (&byte, tail) = rest.split_first()?;
+                rest = tail;
+                if byte == 0 {
+                    if rest.first() == Some(&0xff) {
+                        value.push(0);
+                        rest = &rest[1..];
+                    } else {
+                        break;
+                    }
+                } else {
+                    value.push(byte);
+                }
+            }
+            Some((
+                if tag == 0x40 {
+                    Value::Str(String::from_utf8(value).ok()?)
+                } else {
+                    Value::Bytes(value)
+                },
+                rest,
+            ))
+        }
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Index metadata
 // ---------------------------------------------------------------------------
@@ -247,6 +297,45 @@ pub fn docs_table_name(collection: &str) -> String {
 pub(crate) const REMOVED_TABLE_PREFIXES: [&str; 2] = ["tomb::", "quarantine::"];
 
 pub const META_INDEXES_TABLE: &str = "meta::indexes";
+
+// Optional, transactionally maintained array-document counts. Missing or
+// malformed records mean unknown, never scalar-only. Existing index definitions
+// and keys keep their encoding; rebuilding an old index enables this fast path.
+pub(crate) const META_INDEX_ARRAYS_TABLE: &str = "meta::index_arrays";
+
+pub(crate) fn index_array_count(bytes: &[u8]) -> Option<u64> {
+    Some(u64::from_le_bytes(bytes.try_into().ok()?))
+}
+
+pub(crate) fn adjust_index_arrays(
+    txn: &mut dyn crate::engine::WriteTxn,
+    collection: &str,
+    field: &str,
+    removed: u64,
+    added: u64,
+) -> Result<(), crate::error::TalaDbError> {
+    if removed == added {
+        return Ok(());
+    }
+    let key = meta_key(collection, field);
+    let Some(bytes) = txn.get(META_INDEX_ARRAYS_TABLE, key.as_bytes())? else {
+        return Ok(()); // legacy index: do not invent a partial count
+    };
+    let count = index_array_count(&bytes)
+        .and_then(|n| n.checked_sub(removed))
+        .and_then(|n| n.checked_add(added));
+    if let Some(count) = count {
+        txn.put(
+            META_INDEX_ARRAYS_TABLE,
+            key.as_bytes(),
+            &count.to_le_bytes(),
+        )?;
+    } else {
+        // Unknown metadata disables narrowing without preventing the write.
+        txn.delete(META_INDEX_ARRAYS_TABLE, key.as_bytes())?;
+    }
+    Ok(())
+}
 pub const META_COMPOUND_TABLE: &str = "meta::compound_indexes";
 pub const META_VERSION_TABLE: &str = "meta::db_version";
 pub const META_VERSION_KEY: &[u8] = b"version";

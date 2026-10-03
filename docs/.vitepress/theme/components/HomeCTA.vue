@@ -17,7 +17,7 @@
           Web Demo →
         </a>
         <a
-          href="https://appetize.io/app/b_ugmjhjghdkgnjux4lzkepvsfma"
+          href="https://play.google.com/store/apps/details?id=dev.thinkgrid.kepta"
           class="btn btn-secondary btn-lg"
           target="_blank"
           rel="noopener"
@@ -26,7 +26,7 @@
         </a>
       </div>
       <div class="cta-links">
-        <a href="https://github.com/tala-io/taladb" target="_blank" rel="noopener">GitHub</a>
+        <a href="https://github.com/taladb/taladb" target="_blank" rel="noopener">GitHub</a>
         <span>·</span>
         <a href="https://www.npmjs.com/package/taladb" target="_blank" rel="noopener">npm</a>
         <span>·</span>

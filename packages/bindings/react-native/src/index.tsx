@@ -17,11 +17,11 @@ export type {
   HybridSearchOptions,
   TextSearchOptions,
   VectorMetric,
-  VectorClient, VectorQueryOptions, VectorRebuildOptions, VectorBuildProgress, VectorIndexStatus, VectorQueryResult, VectorRecall, VectorGraphOptions, VectorQuantization,
+  MemoryPressure, VectorCacheStats, VectorClient, VectorQueryOptions, VectorRebuildOptions, VectorBuildProgress, VectorIndexStatus, VectorQueryResult, VectorRecall, VectorGraphOptions, VectorQuantization,
 } from 'taladb';
 
 export const TalaDBModule = {
-  /** Open the native database. The config controls durability/encryption only. */
+  /** Open the native database with durability, encryption and vector cache settings. */
   initialize: (dbName: string, configJson?: string) =>
     NativeTalaDB.initialize(dbName, configJson),
   close: () => NativeTalaDB.close(),
