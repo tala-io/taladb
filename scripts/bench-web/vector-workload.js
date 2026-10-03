@@ -13,6 +13,7 @@ export function settings(search) {
     count: integer('count', 2000, 100, 100000),
     dimensions: integer('dims', 128, 1, 4096),
     queries: integer('queries', 30, 1, 1000),
+    concurrency: integer('concurrency', 4, 1, 16),
     cacheBytes: integer('cache-bytes', 8 * 1024 * 1024, 0, 256 * 1024 * 1024),
     quantization,
     m: 8, efConstruction: 64, batchSize: 32, topK: 10, seed: 42,
@@ -68,6 +69,9 @@ export async function runVectorBenchmark(config, {
   let client
   const decode = value => typeof value === 'string' ? JSON.parse(value) : value
   const command = request => client.call('vectorCommand', { collection: 'vectors', requestJson: JSON.stringify(request) }).then(decode)
+  const cacheStats = async () => {
+    try { return await command({ op: 'cacheStats' }) } catch { return null } // older baseline
+  }
   const open = async () => {
     client = new Client(workerUrl)
     await client.call('init', { dbName, configJson })
@@ -123,16 +127,17 @@ export async function runVectorBenchmark(config, {
         const firstStart = now()
         const first = await search(probes[0], filter.value, 'ann', efSearch)
         const firstQueryMs = now() - firstStart
-        if (first.execution.path !== 'hnsw') throw new Error('ANN was not used')
+        if (first.execution.path !== 'hnsw' && first.execution.reason !== 'memoryBudget') throw new Error('ANN was not used')
         // Warm the fixed query sweep before measuring it.
         for (const query of probes) await search(query, filter.value, 'ann', efSearch)
         const times = []
-        let recall = 0, distances = 0, fingerprint = 2166136261
+        let recall = 0, distances = 0, fingerprint = 2166136261, memoryFallbacks = 0
         for (let i = 0; i < probes.length; i++) {
           const start = now()
           const result = await search(probes[i], filter.value, 'ann', efSearch)
           times.push(now() - start)
-          if (result.execution.path !== 'hnsw') throw new Error('ANN was not used')
+          if (result.execution.reason === 'memoryBudget') memoryFallbacks++
+          else if (result.execution.path !== 'hnsw') throw new Error('ANN was not used')
           distances += result.execution.distanceComputations
           const ids = new Set(truth[i].map(hit => hit.document.ordinal))
           recall += ids.size ? result.hits.filter(hit => ids.has(hit.document.ordinal)).length / ids.size : 1
@@ -141,7 +146,26 @@ export async function runVectorBenchmark(config, {
             fingerprint = Math.imul(fingerprint ^ hit.document.ordinal ^ bits.getUint32(0), 16777619) >>> 0
           }
         }
-        cases.push({ filter: filter.name, efSearch, reopenMs, firstQueryMs, ...percentiles(times), recallAtK: recall / probes.length, distances, fingerprint })
+        // Model concurrent requests from a browser UI. The production worker
+        // serializes core operations; these measure queueing, not Rust threads.
+        const burstTimes = []
+        let burstFallbacks = 0
+        for (let i = 0; i < probes.length; i++) {
+          await Promise.all(Array.from({ length: config.concurrency }, async (_, j) => {
+            const start = now()
+            const result = await search(probes[(i + j) % probes.length], filter.value, 'ann', efSearch)
+            burstTimes.push(now() - start)
+            if (result.execution.reason === 'memoryBudget') burstFallbacks++
+            else if (result.execution.path !== 'hnsw') throw new Error('ANN was not used')
+          }))
+        }
+        const stats = await cacheStats()
+        if (stats && (stats.activeBytes !== 0 || stats.retainedBytes > stats.budgetBytes || stats.peakBytes > stats.memoryBudgetBytes)) {
+          throw new Error('shared search memory accounting exceeded budget or leaked a reservation')
+        }
+        cases.push({ filter: filter.name, efSearch, reopenMs, firstQueryMs, ...percentiles(times), recallAtK: recall / probes.length, distances, fingerprint,
+          firstMemoryFallback: first.execution.reason === 'memoryBudget', memoryFallbacks, cacheStats: stats,
+          burst: { concurrency: config.concurrency, requests: burstTimes.length, ...percentiles(burstTimes), memoryFallbacks: burstFallbacks } })
         progress(`${filter.name} ef=${efSearch}: ${cases.at(-1).p50Ms.toFixed(2)} ms`)
       }
     }

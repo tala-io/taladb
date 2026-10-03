@@ -1,8 +1,9 @@
-//! One retained-memory budget for exact vectors and decoded graph nodes.
-//! Queries borrow entries without holding the mutex. Their working memory,
-//! including concurrent loans, is not a process RSS limit.
+//! Shared accounting for retained caches, pinned vector blocks and active graph
+//! reservations. Queries never hold the mutex while accessing storage.
+//! This estimates decoded search allocations, not process RSS.
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 
 use crate::vector::{CachedVectors, VectorBlock};
 use crate::vector_graph::CachedGraph;
@@ -12,12 +13,17 @@ pub(crate) const DEFAULT_SEARCH_CACHE_BYTES: usize = 8 * 1024 * 1024;
 #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
 pub(crate) const DEFAULT_SEARCH_CACHE_BYTES: usize = 64 * 1024 * 1024;
 
-/// Estimated retained search-cache allocations. Active query/build scratch space and
-/// storage-engine caches are separate from this budget.
-#[derive(Debug, Clone, Copy)]
+/// Estimated decoded search allocations. Reservations conservatively charge the
+/// full allowance of active graph loans and vector-block construction. Storage,
+/// filters, result documents and build scratch are outside these estimates.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct VectorCacheStats {
     pub budget_bytes: usize,
     pub retained_bytes: usize,
+    pub memory_budget_bytes: usize,
+    pub active_bytes: usize,
+    pub peak_bytes: usize,
     pub vector_indexes: usize,
     pub graph_indexes: usize,
 }
@@ -44,6 +50,9 @@ pub(crate) struct SearchCache {
     entries: HashMap<String, Entry>,
     budget: usize,
     clock: u64,
+    active: Arc<AtomicUsize>,
+    vector_loans: Vec<Weak<VectorBlock>>,
+    peak: usize,
     /// Invalidation also discards loans returned by queries already running.
     pub epoch: u64,
 }
@@ -53,6 +62,9 @@ impl Default for SearchCache {
             entries: HashMap::new(),
             budget: DEFAULT_SEARCH_CACHE_BYTES,
             clock: 0,
+            active: Arc::new(AtomicUsize::new(0)),
+            vector_loans: Vec::new(),
+            peak: 0,
             epoch: 0,
         }
     }
@@ -64,9 +76,84 @@ impl SearchCache {
     pub fn budget(&self) -> usize {
         self.budget
     }
+    // Retention may be disabled without disabling ANN. A small, shared 64 KiB
+    // workspace still allows short walks; longer ones fall back to streaming.
+    pub fn memory_budget(&self) -> usize {
+        self.budget.max(64 * 1024)
+    }
+    fn pinned_bytes(&self) -> usize {
+        self.vector_loans
+            .iter()
+            .filter_map(Weak::upgrade)
+            .filter(|block| {
+                !self.entries.values().any(|entry| {
+                    matches!(&entry.value,
+                Value::Vectors(v) if Arc::ptr_eq(&v.vectors, block))
+                })
+            })
+            .map(|block| block.bytes())
+            .sum()
+    }
+    fn active_bytes(&self) -> usize {
+        self.active
+            .load(Ordering::Relaxed)
+            .saturating_add(self.pinned_bytes())
+    }
+    fn record_peak(&mut self) {
+        let stats = self.stats();
+        self.peak = self
+            .peak
+            .max(stats.retained_bytes.saturating_add(stats.active_bytes));
+    }
+    /// Reserve before allocating. Eviction cannot free a block pinned by a query.
+    pub fn reserve(&mut self, bytes: usize) -> Option<MemoryReservation> {
+        self.trim_memory(bytes);
+        if self
+            .stats()
+            .retained_bytes
+            .saturating_add(self.active_bytes())
+            .saturating_add(bytes)
+            > self.memory_budget()
+        {
+            return None;
+        }
+        self.active.fetch_add(bytes, Ordering::Relaxed);
+        self.record_peak();
+        Some(MemoryReservation {
+            active: Arc::clone(&self.active),
+            bytes,
+        })
+    }
+    pub fn reserve_graph(&mut self, minimum: usize) -> MemoryReservation {
+        // Leave other retained indexes resident when they fit. Evict only if
+        // a cached graph or a useful minimum workspace needs their allowance.
+        self.trim_memory(minimum.max(64 * 1024).min(self.memory_budget()));
+        let available = self
+            .memory_budget()
+            .saturating_sub(self.active_bytes())
+            .saturating_sub(self.stats().retained_bytes);
+        if available == 0 {
+            return MemoryReservation {
+                active: Arc::clone(&self.active),
+                bytes: 0,
+            };
+        }
+        // Node caches evict under their allowance, so a walk only needs room
+        // for its visited set and queue. Hold a quarter back for walks that
+        // start while this one runs; otherwise every overlapping query falls
+        // back to an exact scan however large the budget is.
+        let grant = available
+            .saturating_sub(available / 4)
+            .max(minimum.max(64 * 1024).min(available));
+        self.reserve(grant)
+            .expect("available graph reservation fits")
+    }
     pub fn stats(&self) -> VectorCacheStats {
         VectorCacheStats {
             budget_bytes: self.budget,
+            memory_budget_bytes: self.memory_budget(),
+            active_bytes: self.active_bytes(),
+            peak_bytes: self.peak,
             retained_bytes: self.entries.values().map(Entry::bytes).sum(),
             vector_indexes: self
                 .entries
@@ -84,9 +171,36 @@ impl SearchCache {
         self.budget = budget;
         self.epoch = self.epoch.wrapping_add(1);
         self.trim(0);
+        self.trim_memory(0);
+        // Existing loans keep their reservation until exit. Reducing a live
+        // budget prevents new admissions; it cannot revoke borrowed memory.
+        self.peak = self
+            .stats()
+            .retained_bytes
+            .saturating_add(self.active_bytes());
     }
     fn trim(&mut self, incoming: usize) {
         while self.stats().retained_bytes.saturating_add(incoming) > self.budget {
+            let Some(key) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, e)| e.touched)
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            self.entries.remove(&key);
+        }
+    }
+    fn trim_memory(&mut self, incoming: usize) {
+        self.vector_loans.retain(|block| block.strong_count() > 0);
+        while self
+            .stats()
+            .retained_bytes
+            .saturating_add(self.active_bytes())
+            .saturating_add(incoming)
+            > self.memory_budget()
+        {
             let Some(key) = self
                 .entries
                 .iter()
@@ -108,6 +222,10 @@ impl SearchCache {
         }
         self.entries.remove(&key);
         self.trim(entry.bytes());
+        self.trim_memory(entry.bytes());
+        if self.active_bytes().saturating_add(entry.bytes()) > self.memory_budget() {
+            return;
+        }
         self.clock = self.clock.wrapping_add(1);
         self.entries.insert(
             key,
@@ -116,6 +234,7 @@ impl SearchCache {
                 ..entry
             },
         );
+        self.record_peak();
     }
     pub fn vectors(&mut self, key: &str, generation: u64) -> Option<Arc<VectorBlock>> {
         let key = format!("v:{key}");
@@ -132,6 +251,13 @@ impl SearchCache {
             Value::Vectors(v) if v.generation == generation => {
                 self.clock = self.clock.wrapping_add(1);
                 entry.touched = self.clock;
+                if !self
+                    .vector_loans
+                    .iter()
+                    .any(|loan| loan.ptr_eq(&Arc::downgrade(&v.vectors)))
+                {
+                    self.vector_loans.push(Arc::downgrade(&v.vectors));
+                }
                 Some(Arc::clone(&v.vectors))
             }
             _ => None,
@@ -194,6 +320,17 @@ impl SearchCache {
     }
 }
 
+/// Releases on success, error or unwind without re-entering the cache mutex.
+pub(crate) struct MemoryReservation {
+    active: Arc<AtomicUsize>,
+    pub bytes: usize,
+}
+impl Drop for MemoryReservation {
+    fn drop(&mut self) {
+        self.active.fetch_sub(self.bytes, Ordering::Relaxed);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,6 +361,69 @@ mod tests {
         assert_eq!(cache.stats().retained_bytes, 0);
     }
 
+    #[test]
+    fn pinned_blocks_and_builders_share_admission_and_released_loans_restore_space() {
+        let mut cache = SearchCache::default();
+        let n = 4096;
+        let bytes = block(n).bytes();
+        cache.set_budget(bytes);
+        cache.insert_vectors("a", 1, block(n), cache.epoch);
+        let pinned = cache.vectors("a", 1).unwrap();
+        let again = cache.vectors("a", 1).unwrap();
+        assert!(cache.reserve(bytes).is_none());
+        assert_eq!(cache.stats().retained_bytes, 0);
+        assert_eq!(cache.stats().active_bytes, bytes); // counted once
+        drop(again);
+        drop(pinned);
+        let reserved = cache.reserve(bytes).unwrap();
+        assert_eq!(cache.stats().active_bytes, bytes);
+        assert!(cache.reserve(1).is_none());
+        drop(reserved);
+        assert_eq!(cache.stats().active_bytes, 0);
+        assert!(cache.reserve(bytes).is_some());
+        assert!(cache.stats().peak_bytes <= cache.memory_budget());
+    }
+    #[test]
+    fn lowering_a_live_budget_blocks_admission_without_panicking_or_losing_accounting() {
+        let mut cache = SearchCache::default();
+        cache.set_budget(1024 * 1024);
+        let loan = cache.reserve_graph(0);
+        cache.set_budget(0);
+        assert_eq!(cache.stats().active_bytes, 768 * 1024);
+        assert_eq!(cache.reserve_graph(0).bytes, 0);
+        assert!(cache.reserve(1).is_none());
+        drop(loan);
+        assert_eq!(cache.stats().active_bytes, 0);
+        assert_eq!(cache.reserve_graph(0).bytes, 64 * 1024);
+    }
+    #[test]
+    fn overlapping_graph_walks_share_the_budget_instead_of_starving() {
+        let mut cache = SearchCache::default();
+        cache.set_budget(1024 * 1024);
+        let first = cache.reserve_graph(0);
+        let second = cache.reserve_graph(0);
+        let third = cache.reserve_graph(0);
+        assert_eq!(first.bytes, 768 * 1024);
+        assert_eq!(second.bytes, 192 * 1024);
+        assert_eq!(third.bytes, 64 * 1024); // the 64 KiB floor takes the remainder
+        assert!(cache.stats().active_bytes <= cache.memory_budget());
+        // A warm graph keeps its decoded nodes when they fit.
+        drop((first, second, third));
+        assert_eq!(cache.reserve_graph(900 * 1024).bytes, 900 * 1024);
+    }
+    #[test]
+    fn reservation_cleanup_survives_unwind() {
+        let shared = new_shared_search_cache();
+        let result = std::panic::catch_unwind({
+            let shared = shared.clone();
+            move || {
+                let _loan = shared.lock().unwrap().reserve_graph(0);
+                panic!("injected");
+            }
+        });
+        assert!(result.is_err());
+        assert_eq!(shared.lock().unwrap().stats().active_bytes, 0);
+    }
     #[test]
     fn obsolete_vectors_are_freed_without_an_old_snapshot_evicting_newer_vectors() {
         let mut cache = SearchCache::default();

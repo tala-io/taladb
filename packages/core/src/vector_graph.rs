@@ -530,7 +530,8 @@ struct Cached {
 
 #[derive(Default)]
 struct TraversalScratch {
-    visited: HashSet<u64, IdHash>,
+    visited: Vec<u64>,
+    build_visited: HashSet<u64, IdHash>,
     queue: BinaryHeap<Reverse<Hit>>,
     best: BinaryHeap<Hit>,
     decoded: Vec<f32>,
@@ -538,14 +539,14 @@ struct TraversalScratch {
 impl TraversalScratch {
     fn clear(&mut self) {
         self.visited.clear();
+        self.build_visited.clear();
         self.queue.clear();
         self.best.clear();
         self.decoded.clear();
     }
     fn bytes(&self) -> usize {
-        // HashSet capacity describes usable entries, not allocated buckets.
-        // Two words per entry conservatively cover buckets and control bytes.
-        self.visited.capacity() * 16
+        self.visited.capacity() * 8
+            + self.build_visited.capacity() * 16
             + (self.queue.capacity() + self.best.capacity()) * std::mem::size_of::<Hit>()
             + self.decoded.capacity() * 4
     }
@@ -558,9 +559,15 @@ impl TraversalScratch {
         } else {
             budget -= bytes;
         }
-        let bytes = self.visited.capacity() * 16;
+        let bytes = self.visited.capacity() * 8;
         if bytes > budget {
-            self.visited = HashSet::default();
+            self.visited = Vec::new();
+        } else {
+            budget -= bytes;
+        }
+        let bytes = self.build_visited.capacity() * 16;
+        if bytes > budget {
+            self.build_visited = HashSet::default();
         } else {
             budget -= bytes;
         }
@@ -590,6 +597,7 @@ pub(crate) struct NodeCache {
     bytes: usize,
     budget: usize,
     scratch: TraversalScratch,
+    working_budget: Option<usize>,
 }
 impl Default for NodeCache {
     fn default() -> Self {
@@ -604,6 +612,7 @@ impl NodeCache {
             bytes: 0,
             budget,
             scratch: TraversalScratch::default(),
+            working_budget: None,
         }
     }
     pub(crate) fn bytes(&self) -> usize {
@@ -678,6 +687,27 @@ impl NodeCache {
         }
         self.bytes = self.bytes.saturating_add(bytes);
     }
+    fn trim_nodes(&mut self, budget: usize) {
+        while self.bytes > budget && !self.nodes.is_empty() {
+            let Some(victim) = self.clock.pop_front() else {
+                break;
+            };
+            let Some(entry) = self.nodes.get_mut(&victim) else {
+                continue;
+            };
+            if entry.referenced {
+                entry.referenced = false;
+                self.clock.push_back(victim);
+            } else if let Some(old) = self.nodes.remove(&victim) {
+                self.bytes = self.bytes.saturating_sub(old.bytes);
+            }
+        }
+        // Evicted records must also release oversized container allocations.
+        if self.nodes.capacity() > self.nodes.len().saturating_mul(2) {
+            self.nodes.shrink_to_fit();
+            self.clock.shrink_to_fit();
+        }
+    }
     fn restore_scratch(&mut self, mut scratch: TraversalScratch) {
         scratch.clear();
         // Large filtered traversals can visit the whole graph. Do not retain
@@ -703,7 +733,9 @@ impl NodeCache {
 
 pub(crate) struct CachedGraph {
     pub revision: u64,
-    pub cache: NodeCache,
+    // Keep the shared cache's entry compact. The same allocation travels with
+    // its lease and is reused when returned, rather than boxing on every query.
+    pub cache: Box<NodeCache>,
 }
 
 /// A loan pins decoded nodes to a unique graph table and its vector revision
@@ -714,8 +746,10 @@ pub(crate) struct CacheLease<'a> {
     table: String,
     revision: u64,
     epoch: u64,
-    cache: Option<NodeCache>,
+    cache: Option<Box<NodeCache>>,
     retain: bool,
+    reservation: Option<crate::search_cache::MemoryReservation>,
+    retention_budget: usize,
 }
 impl<'a> CacheLease<'a> {
     pub(crate) fn take(
@@ -728,9 +762,14 @@ impl<'a> CacheLease<'a> {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut cache = match map.take_graph(table) {
             Some(entry) if entry.revision == revision => entry.cache,
-            _ => NodeCache::with_budget(map.budget()),
+            _ => Box::new(NodeCache::with_budget(map.budget())),
         };
-        cache.budget = map.budget();
+        let retention_budget = map.budget();
+        let reservation = map.reserve_graph(cache.bytes());
+        cache.budget = reservation.bytes;
+        cache.working_budget = Some(reservation.bytes);
+        cache.scratch.trim(reservation.bytes / 32);
+        cache.trim_nodes(reservation.bytes.saturating_sub(cache.scratch.bytes()));
         Self {
             shared,
             table: table.to_string(),
@@ -738,6 +777,8 @@ impl<'a> CacheLease<'a> {
             epoch: map.epoch,
             cache: Some(cache),
             retain: true,
+            reservation: Some(reservation),
+            retention_budget,
         }
     }
     /// A writer must explicitly confirm commit before returning edited nodes.
@@ -749,6 +790,10 @@ impl<'a> CacheLease<'a> {
     ) -> Self {
         let mut lease = Self::take(shared, table, processed);
         lease.retain = false;
+        lease.cache_mut().working_budget = None;
+        lease.cache_mut().budget = lease
+            .retention_budget
+            .min(lease.reservation.as_ref().unwrap().bytes);
         lease
     }
     pub(crate) fn committed_build(&mut self, processed: u64) {
@@ -763,18 +808,28 @@ impl<'a> CacheLease<'a> {
 }
 impl Drop for CacheLease<'_> {
     fn drop(&mut self) {
-        if let Some(cache) = self.cache.take().filter(|_| self.retain) {
-            self.shared
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert_graph(
-                    &self.table,
-                    CachedGraph {
-                        revision: self.revision,
-                        cache,
-                    },
-                    self.epoch,
-                );
+        let mut map = self
+            .shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(mut cache) = self.cache.take() {
+            cache.working_budget = None;
+            cache.budget = self.retention_budget.min(cache.budget);
+            let scratch = std::mem::take(&mut cache.scratch);
+            cache.restore_scratch(scratch);
+            // Release the active allowance and admit retention under one lock.
+            drop(self.reservation.take());
+            if !self.retain {
+                return;
+            }
+            map.insert_graph(
+                &self.table,
+                CachedGraph {
+                    revision: self.revision,
+                    cache,
+                },
+                self.epoch,
+            );
         }
     }
 }
@@ -788,7 +843,18 @@ struct Reader<'a> {
 }
 impl<'a> Reader<'a> {
     fn new(txn: &'a dyn ReadTxn, h: &'a Header, cache: &'a mut NodeCache) -> Self {
-        let scratch = std::mem::take(&mut cache.scratch);
+        let mut scratch = std::mem::take(&mut cache.scratch);
+        if cache.working_budget.is_some() {
+            scratch.build_visited = HashSet::default();
+        } else {
+            // Builds usually visit a small neighborhood. Sparse visitation
+            // avoids initializing a whole-graph bitmap for every insertion.
+            scratch.visited = Vec::new();
+        }
+        if let Some(limit) = cache.working_budget {
+            cache.budget = limit.saturating_sub(scratch.bytes());
+            cache.trim_nodes(cache.budget);
+        }
         Self {
             txn,
             h,
@@ -796,6 +862,48 @@ impl<'a> Reader<'a> {
             distances: 0,
             scratch,
         }
+    }
+    /// Make room before growing scratch. Cache nodes are evictable; visited
+    /// state and queued candidates are not, because losing them changes recall.
+    fn workspace(&mut self, bytes: usize) -> Result<(), TalaDbError> {
+        if let Some(limit) = self.cache.working_budget {
+            if bytes > limit {
+                return Err(TalaDbError::SearchMemoryLimit);
+            }
+            self.cache.budget = limit - bytes;
+            self.cache.trim_nodes(self.cache.budget);
+        }
+        Ok(())
+    }
+    fn push_queue(&mut self, hit: Hit) -> Result<(), TalaDbError> {
+        if self.scratch.queue.len() == self.scratch.queue.capacity() {
+            let old = self.scratch.queue.capacity();
+            let target = old.saturating_mul(2).max(4);
+            self.workspace(
+                self.scratch
+                    .bytes()
+                    .saturating_add((target - old).saturating_mul(std::mem::size_of::<Hit>())),
+            )?;
+            self.scratch
+                .queue
+                .reserve_exact(target - self.scratch.queue.len());
+        }
+        self.scratch.queue.push(Reverse(hit));
+        Ok(())
+    }
+    fn visit(&mut self, id: u64) -> Result<bool, TalaDbError> {
+        if id >= self.h.next {
+            return Err(invalid("invalid HNSW neighbor ID"));
+        }
+        if self.cache.working_budget.is_none() {
+            return Ok(self.scratch.build_visited.insert(id));
+        }
+        let word = &mut self.scratch.visited
+            [usize::try_from(id / 64).map_err(|_| TalaDbError::SearchMemoryLimit)?];
+        let mask = 1u64 << (id % 64);
+        let new = *word & mask == 0;
+        *word |= mask;
+        Ok(new)
     }
     fn load(&mut self, id: u64) -> Result<(), TalaDbError> {
         if !self.cache.nodes.contains_key(&id) {
@@ -813,6 +921,17 @@ impl<'a> Reader<'a> {
             {
                 return Err(invalid("invalid HNSW node; rebuild the vector index"));
             }
+            let vector_bytes = match &node.code {
+                Code::Float(v) => v.capacity() * 4,
+                Code::Scalar { values, .. } | Code::Binary(values) => values.capacity(),
+            };
+            let bytes = vector_bytes
+                + node.links.0.len() * 8
+                + 2 * std::mem::size_of::<(u64, Cached)>()
+                + 16;
+            if self.cache.working_budget.is_some() && bytes > self.cache.budget {
+                return Err(TalaDbError::SearchMemoryLimit);
+            }
             self.cache.insert_cached_node(id, node, self.h.dimensions);
         }
         Ok(())
@@ -828,6 +947,14 @@ impl<'a> Reader<'a> {
     }
     fn distance(&mut self, query: &Query<'_>, id: u64) -> Result<Hit, TalaDbError> {
         let h = self.h;
+        if self.scratch.decoded.capacity() < h.dimensions {
+            self.workspace(self.scratch.bytes().saturating_add(
+                (h.dimensions - self.scratch.decoded.capacity()).saturating_mul(4),
+            ))?;
+            self.scratch
+                .decoded
+                .reserve_exact(h.dimensions - self.scratch.decoded.len());
+        }
         // Scoped so the borrow of `self.nodes` ends before `self.distances` is
         // touched: with a borrowed `Cow` the vector points into the cached node.
         let score = {
@@ -891,11 +1018,34 @@ impl<'a> Reader<'a> {
         self.scratch.visited.clear();
         self.scratch.queue.clear();
         self.scratch.best.clear();
+        self.scratch.build_visited.clear();
+        let words = if self.cache.working_budget.is_some() {
+            usize::try_from(self.h.next.div_ceil(64)).map_err(|_| TalaDbError::SearchMemoryLimit)?
+        } else {
+            0
+        };
+        let best_capacity = ef.checked_add(1).ok_or(TalaDbError::SearchMemoryLimit)?;
+        let growth = words
+            .saturating_sub(self.scratch.visited.capacity())
+            .saturating_mul(8)
+            .saturating_add(
+                best_capacity
+                    .saturating_sub(self.scratch.best.capacity())
+                    .saturating_mul(std::mem::size_of::<Hit>()),
+            );
+        self.workspace(self.scratch.bytes().saturating_add(growth))?;
+        if words > self.scratch.visited.capacity() {
+            self.scratch.visited.reserve_exact(words);
+        }
+        self.scratch.visited.resize(words, 0);
+        if best_capacity > self.scratch.best.capacity() {
+            self.scratch.best.reserve_exact(best_capacity);
+        }
         let mut neighbors = [0u64; 256];
         for &id in entries {
             let hit = self.distance(q, id)?;
-            self.scratch.visited.insert(id);
-            self.scratch.queue.push(Reverse(hit));
+            self.visit(id)?;
+            self.push_queue(hit)?;
             let n = self.node(id)?;
             if (!live_only || !n.deleted) && allowed.is_none_or(|a| a.contains(&n.doc)) {
                 self.scratch.best.push(hit);
@@ -909,14 +1059,14 @@ impl<'a> Reader<'a> {
             }
             let count = self.copy_links(hit.1, layer, &mut neighbors)?;
             for &id in &neighbors[..count] {
-                if !self.scratch.visited.insert(id) {
+                if !self.visit(id)? {
                     continue;
                 }
                 let next = self.distance(q, id)?;
                 if self.scratch.best.len() < ef
                     || self.scratch.best.peek().is_some_and(|worst| next < *worst)
                 {
-                    self.scratch.queue.push(Reverse(next));
+                    self.push_queue(next)?;
                     let n = self.node(id)?;
                     if (!live_only || !n.deleted) && allowed.is_none_or(|a| a.contains(&n.doc)) {
                         self.scratch.best.push(next);
@@ -927,6 +1077,14 @@ impl<'a> Reader<'a> {
                 }
             }
         }
+        self.workspace(
+            self.scratch.bytes().saturating_add(
+                self.scratch
+                    .best
+                    .len()
+                    .saturating_mul(std::mem::size_of::<Hit>()),
+            ),
+        )?;
         let mut hits: Vec<_> = self.scratch.best.drain().collect();
         hits.sort_unstable();
         Ok(hits)
@@ -1411,7 +1569,7 @@ mod cache_tests {
         }
         let before = cache.nodes.len();
         let mut scratch = TraversalScratch::default();
-        scratch.visited.extend(0..32);
+        scratch.visited.extend([u64::MAX; 64]);
         scratch
             .queue
             .extend((0..32).map(|id| Reverse(Hit(1.0, id))));
@@ -1442,6 +1600,70 @@ mod cache_tests {
         let scratch = std::mem::take(&mut cache.scratch);
         cache.restore_scratch(scratch);
         assert_eq!(cache.bytes(), 0);
+    }
+    #[test]
+    fn borrowed_scratch_remains_charged_during_greedy_cache_loading_and_bit_boundaries() {
+        let db = crate::Database::open_in_memory().unwrap();
+        let txn = db.backend().begin_read().unwrap();
+        let h = Header {
+            next: 128,
+            ..Header::new(
+                "test".into(),
+                0,
+                GraphOptions::default(),
+                2,
+                VectorMetric::Cosine,
+            )
+        };
+        let mut cache = NodeCache::with_budget(64 * 1024);
+        for id in 0..1000 {
+            cache.insert_node(id, node(), 2);
+        }
+        let mut scratch = TraversalScratch::default();
+        scratch.decoded.reserve_exact(128);
+        scratch.visited.reserve_exact(128);
+        cache.restore_scratch(scratch);
+        cache.working_budget = Some(64 * 1024);
+        let mut reader = Reader::new(txn.as_ref(), &h, &mut cache);
+        for id in 1000..1100 {
+            reader.cache.insert_node(id, node(), 2);
+            assert!(reader.cache.bytes() + reader.scratch.bytes() <= 64 * 1024);
+        }
+        reader.scratch.visited.resize(2, 0);
+        for id in [0, 63, 64, 127] {
+            assert!(reader.visit(id).unwrap());
+            assert!(!reader.visit(id).unwrap());
+        }
+        assert!(matches!(
+            reader.visit(128),
+            Err(TalaDbError::InvalidOperation(_))
+        ));
+    }
+    #[test]
+    fn build_walks_do_not_allocate_from_historical_node_id_high_water() {
+        let db = crate::Database::open_in_memory().unwrap();
+        let txn = db.backend().begin_read().unwrap();
+        let h = Header {
+            next: 1u64 << 40,
+            ..Header::new(
+                "test".into(),
+                0,
+                GraphOptions::default(),
+                2,
+                VectorMetric::Cosine,
+            )
+        };
+        let mut cache = NodeCache::default();
+        let mut n = node();
+        n.links[0].clear();
+        cache.insert_node(0, n, 2);
+        let mut reader = Reader::new(txn.as_ref(), &h, &mut cache);
+        let hits = reader
+            .layer(&Query::float(&[1.0, 0.0]), &[0], 0, 8, None, true)
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(reader.scratch.visited.capacity(), 0);
+        assert_eq!(reader.scratch.build_visited.len(), 1);
     }
     #[test]
     fn reused_decode_buffer_preserves_quantized_components_and_scores() {

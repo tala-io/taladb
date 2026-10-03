@@ -1457,7 +1457,18 @@ impl Collection {
                 let count = usize::try_from(txn.count_entries(&table)?).unwrap_or(usize::MAX);
                 let estimate =
                     count.checked_mul(def.dimensions.saturating_mul(4).saturating_add(16));
-                let retain = estimate.is_some_and(|n| n <= budget && budget > 0);
+                // Reserve before decoding a full block. Concurrent exact
+                // queries that cannot claim space simply stream the table.
+                let mut reservation =
+                    estimate
+                        .filter(|&n| n <= budget && budget > 0)
+                        .and_then(|n| {
+                            self.search_cache
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .reserve(n)
+                        });
+                let retain = reservation.is_some();
                 let mut block = VectorBlock {
                     dimensions: def.dimensions,
                     ..Default::default()
@@ -1486,11 +1497,13 @@ impl Collection {
                         Ok(crate::engine::ScanFlow::Continue)
                     },
                 )?;
-                if retain && block.bytes() <= budget {
-                    self.search_cache
+                if retain && block.bytes() <= reservation.as_ref().unwrap().bytes {
+                    let mut cache = self
+                        .search_cache
                         .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .insert_vectors(&cache_key, generation, block, epoch);
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    drop(reservation.take());
+                    cache.insert_vectors(&cache_key, generation, block, epoch);
                 }
             }
         }

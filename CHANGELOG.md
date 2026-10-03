@@ -19,6 +19,9 @@
 
 - Reduced HNSW traversal allocations with compact cached links, stack neighbor buffers, and reusable visited sets, heaps and quantized-vector decoding buffers. Retained scratch allocations count toward the shared cache budget and are capped at 128 KiB or one thirty-second of that budget. Stored graphs and scoring semantics are unchanged. Added browser worker/OPFS benchmarks with 1 MiB and 8 MiB cache profiles, persisted reopen, first-query and warm latency, filtered recall, and origin-memory measurements where supported. The same workload can run manually on a phone's browser.
 
+- Bound decoded search memory across active graph loans, pinned exact-vector blocks and cache construction. ANN traversal now uses a compact visited bitset and checks buffer growth before allocation; each walk reserves at most three quarters of the free allowance, so overlapping walks keep using the graph, and walks that cannot fit fall back to exact search on the same snapshot with `execution.reason: "memoryBudget"`. Cache statistics report conservative active/peak reservations. Zero disables retention while keeping a shared 64 KiB workspace for short ANN walks.
+- Extend browser/OPFS benchmarks with queued request bursts and search-memory accounting; add a true concurrent core benchmark at 1 MiB and 8 MiB budgets in CI.
+
 ## 0.11.9 — 2026-10-02
 
 Groundwork for first-party Kotlin and Swift packages that wrap the C FFI directly, without React Native. Those packages live in their own repositories (`tala-io/taladb-kotlin`, `tala-io/taladb-swift`) and consume prebuilt libraries from the GitHub release, so the C interface now carries an explicit version.

@@ -35,6 +35,12 @@ unfiltered queries, a 10% tenant filter and a 1% bucket filter, each at
 - Worker/database reopen time and the first ANN query after reopening.
 - Warm query p50/p95, distance computations, and recall against exact results
   from the same query and filter.
+- Queued bursts of four concurrent UI requests, including queue latency p50/p95
+  and memory-fallback counts. Set `--concurrency 1..16` to change the burst size.
+  The worker serializes core operations; these bursts do not run Rust searches
+  in parallel.
+- Retained bytes and peak reserved search allowance when the binding supports
+  `cacheStats`; these are conservative estimates, not measured peak heap/RSS.
 - Stable result fingerprints using document ordinals and rescored f32 scores.
 - Origin memory before and after the suite, where the browser supports
   `measureUserAgentSpecificMemory`. Unsupported or timed-out measurements are
@@ -67,7 +73,7 @@ Remove the forwarding afterward with `adb reverse --remove tcp:3000`.
 
 For iOS Safari, serve the benchmark assets and built WASM package from an HTTPS
 origin available to the phone. The page at `scripts/bench-web/vector.html`
-accepts `count`, `dims`, `queries`, `quantization`, and `cache-bytes` URL
+accepts `count`, `dims`, `queries`, `quantization`, `concurrency`, and `cache-bytes` URL
 parameters. Preserve the repository-relative asset paths. COOP `same-origin`
 and COEP `require-corp` headers enable origin-memory measurements in browsers
 that support them. Vector queries still run when that memory API is absent.
@@ -86,6 +92,22 @@ cargo run --release -p taladb --example hnsw_profile -- 10000 0.6 \
   --json --dims 128 --m 8 --ef-construction 64 --quantization binary \
   --queries 30 --cache-bytes 8388608
 ```
+
+For real concurrent core searches, run the native memory workload. It starts
+1, 2 and 4 threads together, records latency, recall, exact-fallback counts and
+peak reserved allowance, and checks that all loans are released:
+
+```sh
+cargo run --release -p taladb --example vector_memory_profile -- \
+  --cache-bytes 1048576 --count 2000 --dims 128 --queries 20
+```
+
+Repeat with `--cache-bytes 8388608`. The CI native jobs run both budgets and
+publish `vector-memory-*.json`. These core runs exercise native concurrency;
+they do not substitute for Kotlin/Swift device benchmarks. Filter ID sets,
+result pools, record decoding, build scratch and storage-engine memory are
+outside the reported search allowance. Budget limits can switch ANN to exact,
+so compare latency together with fallback counts and recall.
 
 CI compares baseline and candidate builds on the same runner. Chromium runs
 the production worker/OPFS suite with both 1 MiB and 8 MiB budgets when the

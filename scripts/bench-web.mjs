@@ -63,7 +63,7 @@ async function main() {
   if (args.includes('--quick')) query.set('quick', '1')
   if (vectors) {
     const { settings } = await import('./bench-web/vector-workload.js')
-    for (const name of ['count', 'dims', 'queries', 'cache-bytes', 'quantization']) {
+    for (const name of ['count', 'dims', 'queries', 'cache-bytes', 'quantization', 'concurrency']) {
       const value = option(`--${name}`, null)
       if (value !== null) query.set(name, value)
     }
