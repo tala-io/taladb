@@ -47,6 +47,43 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Releasing version: $VERSION"
 
+      # Publishing takes versions from the manifests, not the tag; a mismatch
+      # would ship whatever the files say under this tag's name.
+      - name: Versions match the tag
+        run: node scripts/sync-version.js --check "${{ steps.parse.outputs.version }}"
+
+      # Every publish below fails on a missing or rejected credential rather
+      # than skipping, so check them all before anything is built or published.
+      # crates.io has no token-introspection endpoint: CARGO_REGISTRY_TOKEN is
+      # only checked for presence, and needs the publish-new scope until the
+      # crate's first release, publish-update after.
+      - name: Publishing credentials
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          DISPATCH_TOKEN: ${{ secrets.NATIVE_PACKAGES_DISPATCH_TOKEN }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in NPM_TOKEN CARGO_REGISTRY_TOKEN DISPATCH_TOKEN; do
+            if [ -z "${!name}" ]; then echo "::error::secret $name is not set"; missing=1; fi
+          done
+          [ "$missing" = 0 ] || exit 1
+          # npm reports an expired or revoked token only at publish time, as a 404.
+          export NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/npm-check.npmrc"
+          trap 'rm -f "$NPM_CONFIG_USERCONFIG"' EXIT
+          echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > "$NPM_CONFIG_USERCONFIG"
+          user="$(npm whoami)" || { echo "::error::npm rejects NPM_TOKEN (expired or revoked)"; exit 1; }
+          for pkg in taladb @taladb/web @taladb/node @taladb/react @taladb/react-native; do
+            owners="$(npm owner ls "$pkg")"
+            grep -q "^$user " <<<"$owners" || { echo "::error::npm user $user is not an owner of $pkg"; exit 1; }
+          done
+          for repo in taladb-kotlin taladb-swift; do
+            GH_TOKEN="$DISPATCH_TOKEN" gh api "repos/taladb/$repo" --silent \
+              || { echo "::error::NATIVE_PACKAGES_DISPATCH_TOKEN cannot reach taladb/$repo"; exit 1; }
+          done
+          echo "npm user $user owns every package; crates.io and dispatch tokens are set"
+
   # ---------------------------------------------------------------------------
   # Full CI gate — re-run all checks at the exact tagged commit
   # ---------------------------------------------------------------------------
@@ -80,6 +117,10 @@ jobs:
       - run: cargo clippy --workspace -- -D warnings
       - run: cargo test --workspace
 
+      # Packages and builds the crate exactly as crates.io will receive it.
+      - name: crates.io package dry run
+        run: cargo publish -p taladb --dry-run --locked
+
   vector-performance:
     name: Vector performance gate
     needs: preflight
@@ -98,12 +139,29 @@ jobs:
   # breaking change to the Rust API must bump the minor version, never the
   # patch — or `cargo update` breaks every downstream build.
   #
-  # Needs CARGO_REGISTRY_TOKEN, a crates.io API token scoped to publish-update
-  # on `taladb`. Skipped, not failed, while the secret is unset.
+  # Needs CARGO_REGISTRY_TOKEN (checked in preflight): a crates.io API token
+  # with publish-new until `taladb`'s first release, publish-update after.
+  #
+  # Nothing publishes until every gate and build has passed, and the
+  # registries publish in sequence — crates.io, then npm, then the GitHub
+  # release and the native-package dispatch — each only if the previous step
+  # succeeded. Re-running a failed release skips what already published.
   publish-crate:
     name: Publish — taladb (crates.io)
     runs-on: ubuntu-latest
-    needs: [rust-check, vector-performance]
+    needs:
+      [
+        rust-check,
+        ts-check,
+        vector-performance,
+        build-wasm,
+        build-node,
+        build-cli,
+        build-rn-ios,
+        build-rn-android,
+        build-taladb,
+        build-taladb-react,
+      ]
     env:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
@@ -116,7 +174,6 @@ jobs:
       # A re-run of a release that already published this version would
       # otherwise fail on crates.io's "already exists".
       - name: Publish unless this version is already on crates.io
-        if: env.CARGO_REGISTRY_TOKEN != ''
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
@@ -166,7 +223,7 @@ jobs:
   build-wasm:
     name: Build — WASM
     runs-on: ubuntu-latest
-    needs: [rust-check, ts-check]
+    needs: [preflight, rust-check, ts-check]
 
     steps:
       - uses: actions/checkout@v4
@@ -627,6 +684,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       [
+        publish-crate,
         vector-performance,
         build-wasm,
         build-node,
@@ -672,8 +730,7 @@ jobs:
           rm -f packages/bindings/web/pkg/.gitignore
 
       - name: Publish @taladb/web
-        working-directory: packages/bindings/web
-        run: pnpm publish --no-git-checks --access public || echo 'Already published, skipping'
+        run: scripts/npm-publish.sh packages/bindings/web
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -697,8 +754,7 @@ jobs:
           path: packages/bindings/node
 
       - name: Publish @taladb/node
-        working-directory: packages/bindings/node
-        run: pnpm publish --no-git-checks --access public || echo 'Already published, skipping'
+        run: scripts/npm-publish.sh packages/bindings/node
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -716,8 +772,7 @@ jobs:
           path: packages/bindings/react-native/android/src/main/jniLibs
 
       - name: Publish @taladb/react-native
-        working-directory: packages/bindings/react-native
-        run: pnpm publish --no-git-checks --access public || echo 'Already published, skipping'
+        run: scripts/npm-publish.sh packages/bindings/react-native
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -729,8 +784,7 @@ jobs:
           path: packages/clients/react/dist
 
       - name: Publish @taladb/react
-        working-directory: packages/clients/react
-        run: pnpm publish --no-git-checks --access public || echo 'Already published, skipping'
+        run: scripts/npm-publish.sh packages/clients/react
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -745,14 +799,13 @@ jobs:
         working-directory: packages/clients/taladb
         run: npm pack --dry-run
 
-      # `pnpm publish`, not `npm publish`: this package declares its bindings as
-      # `workspace:*` peers, and only pnpm rewrites that protocol to a real
-      # version on publish. npm ships it verbatim — taladb@0.9.3 went out with
-      # `"@taladb/web": "workspace:*"` in peerDependencies, which no consumer
-      # can resolve.
+      # scripts/npm-publish.sh uses `pnpm publish`, not `npm publish`: this
+      # package declares its bindings as `workspace:*` peers, and only pnpm
+      # rewrites that protocol to a real version on publish. npm ships it
+      # verbatim — taladb@0.9.3 went out with `"@taladb/web": "workspace:*"` in
+      # peerDependencies, which no consumer can resolve.
       - name: Publish taladb
-        working-directory: packages/clients/taladb
-        run: pnpm publish --no-git-checks --access public || echo 'Already published, skipping'
+        run: scripts/npm-publish.sh packages/clients/taladb
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -762,7 +815,7 @@ jobs:
   github-release:
     name: GitHub Release
     runs-on: ubuntu-latest
-    needs: [publish-npm, build-rn-android, build-rn-ios]
+    needs: [publish-crate, publish-npm, build-rn-android, build-rn-ios]
     permissions:
       contents: write
 
@@ -827,9 +880,9 @@ jobs:
   # exists; a workflow there opens the bump PR and runs its tests against it,
   # so a release that breaks a wrapper is caught there rather than by its users.
   #
-  # Needs NATIVE_PACKAGES_DISPATCH_TOKEN — a fine-grained token with
-  # Contents: write on taladb/taladb-kotlin and taladb/taladb-swift. Skipped,
-  # not failed, while the secret is unset, so a release never blocks on it.
+  # Needs NATIVE_PACKAGES_DISPATCH_TOKEN (checked in preflight) — a
+  # fine-grained token with Contents: write on taladb/taladb-kotlin and
+  # taladb/taladb-swift.
   notify-native-packages:
     name: Notify native packages
     runs-on: ubuntu-latest
@@ -839,7 +892,6 @@ jobs:
 
     steps:
       - name: Dispatch taladb-release to taladb/taladb-kotlin
-        if: env.DISPATCH_TOKEN != ''
         env:
           GH_TOKEN: ${{ secrets.NATIVE_PACKAGES_DISPATCH_TOKEN }}
         run: |
@@ -855,7 +907,6 @@ jobs:
             -f "client_payload[sha256]=$SHA256"
 
       - name: Dispatch taladb-release to taladb/taladb-swift
-        if: env.DISPATCH_TOKEN != ''
         env:
           GH_TOKEN: ${{ secrets.NATIVE_PACKAGES_DISPATCH_TOKEN }}
         run: |
