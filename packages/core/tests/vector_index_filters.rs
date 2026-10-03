@@ -17,6 +17,7 @@ struct Counts {
     index_points: AtomicUsize,
     vector_points: AtomicUsize,
     vector_scans: AtomicUsize,
+    graph_maps: AtomicUsize,
     on_index_scan: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 impl Counts {
@@ -26,6 +27,13 @@ impl Counts {
         self.index_points.store(0, Ordering::SeqCst);
         self.vector_points.store(0, Ordering::SeqCst);
         self.vector_scans.store(0, Ordering::SeqCst);
+        self.graph_maps.store(0, Ordering::SeqCst);
+    }
+    // Document-to-node mappings: a streamed filter bitmap reads one per match.
+    fn graph_map(&self, table: &str, key: &[u8]) {
+        if table.starts_with("hnsw::") && key.len() == 17 && key[0] == 2 {
+            self.graph_maps.fetch_add(1, Ordering::SeqCst);
+        }
     }
     fn reads(&self, table: &str, n: usize) {
         if table.starts_with("idx::") || table.starts_with("cidx::") {
@@ -65,6 +73,9 @@ impl ReadTxn for Reader<'_> {
     }
     fn get_many(&self, t: &str, keys: &[&[u8]]) -> Result<Vec<Option<Vec<u8>>>, TalaDbError> {
         self.counts.reads(t, keys.len());
+        for key in keys {
+            self.counts.graph_map(t, key);
+        }
         self.inner.get_many(t, keys)
     }
     fn range(&self, t: &str, s: Bound<&[u8]>, e: Bound<&[u8]>) -> Result<KvPairs, TalaDbError> {
@@ -102,6 +113,7 @@ impl ReadTxn for Reader<'_> {
             if t.starts_with("docs::") {
                 self.counts.documents.fetch_add(1, Ordering::SeqCst);
             }
+            self.counts.graph_map(t, k);
             f(k, v)
         })
     }
@@ -1082,6 +1094,78 @@ fn text_postings_and_partial_indexes_narrow_streamed_residual_reads() {
                 "indexed predicates must not scan the collection: {filter:?}"
             );
             assert_eq!(db.vector_cache_stats().active_bytes, 0);
+        }
+    }
+}
+
+#[test]
+fn moderate_filters_keep_the_id_set_until_the_budget_is_too_small() {
+    let (db, counts) = database();
+    let col = db.collection("docs").unwrap();
+    col.insert_many(
+        (0..1500)
+            .map(|i| {
+                vec![
+                    ("half".into(), Value::Int(i % 2)),
+                    (
+                        "v".into(),
+                        Value::Array(vec![Value::Float(i as f64), Value::Float(1.0)]),
+                    ),
+                ]
+            })
+            .collect(),
+    )
+    .unwrap();
+    col.create_index("half").unwrap();
+    col.create_vector_index_with_options(
+        "v",
+        2,
+        Some(taladb::VectorMetric::Euclidean),
+        Some(GraphOptions {
+            m: 4,
+            ef_construction: 16,
+            ..Default::default()
+        }),
+    )
+    .unwrap();
+    let filter = Filter::Eq("half".into(), Value::Int(0));
+    let search = |mode| {
+        col.search_vectors(
+            "v",
+            &[0.0, 1.0],
+            5,
+            Some(filter.clone()),
+            &VectorQueryOptions {
+                mode,
+                ef_search: Some(1500),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .hits
+        .iter()
+        .map(|h| (h.document.id, h.score.to_bits()))
+        .collect::<Vec<_>>()
+    };
+    let expected = search(VectorSearchMode::Exact);
+    // 750 matches: 1 MiB allows 1,024 retained IDs, 256 KiB only 256. Memory
+    // pressure lowers the budget the same way.
+    for (budget, streamed) in [
+        (1024 * 1024, false),
+        (256 * 1024, true),
+        (1024 * 1024, false),
+    ] {
+        db.set_vector_cache_budget(budget);
+        counts.reset();
+        assert_eq!(search(VectorSearchMode::Ann), expected);
+        let maps = counts.graph_maps.load(Ordering::SeqCst);
+        if streamed {
+            assert!(
+                maps >= 750,
+                "a streamed bitmap maps every match, read {maps}"
+            );
+        } else {
+            assert_eq!(maps, 0, "a retained ID set needs no node mappings");
         }
     }
 }

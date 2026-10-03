@@ -37,8 +37,12 @@ pub use vector_api::*;
 #[path = "vector_window.rs"]
 mod vector_window;
 
-// Keep preparatory ID collections small before switching to streaming.
-const VECTOR_FILTER_ID_LIMIT: usize = 256;
+// Exact search streams anything larger than this: it reuses a decoded vector
+// block or batches reads, which beats building a set. ANN keeps a larger set,
+// scaled with the search budget (one ID per KiB, about 4% of it at HashSet's
+// worst-case footprint), because streaming it needs a doc-to-node lookup per match.
+const VECTOR_FILTER_MIN_IDS: usize = 256;
+const VECTOR_FILTER_BUDGET_BYTES_PER_ID: usize = 1024;
 
 const META_FTS_TABLE: &str = "meta::fts_indexes";
 
@@ -1326,12 +1330,24 @@ impl Collection {
         )
     }
 
-    // At most this many IDs are retained by any filter branch or union. Large
-    // matches switch to a visitor; this limit is separate from the cache budget.
+    // Memory pressure lowers the budget and with it this limit.
+    fn ann_filter_id_limit(&self) -> usize {
+        (self
+            .search_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .budget()
+            / VECTOR_FILTER_BUDGET_BYTES_PER_ID)
+            .max(VECTOR_FILTER_MIN_IDS)
+    }
+
+    // At most `limit` IDs are retained by any filter branch or union. Larger
+    // matches switch to a visitor (for ANN, a bitmap charged to the graph loan).
     fn bounded_vector_ids_in(
         &self,
         txn: &dyn ReadTxn,
         filter: &Filter,
+        limit: usize,
     ) -> Result<Option<HashSet<[u8; 16]>>, TalaDbError> {
         let cache = self.load_indexes_in(txn)?;
         let plan = plan_full(
@@ -1347,7 +1363,7 @@ impl Collection {
             &self.name,
             &cache.indexes,
             &cache.compound_indexes,
-            VECTOR_FILTER_ID_LIMIT,
+            limit,
         )
     }
 
@@ -1419,7 +1435,7 @@ impl Collection {
         let cache_key = vec_meta_key(&self.name, field);
         let allowed = pre_filter
             .as_ref()
-            .map(|f| self.bounded_vector_ids_in(txn, f))
+            .map(|f| self.bounded_vector_ids_in(txn, f, VECTOR_FILTER_MIN_IDS))
             .transpose()?
             .flatten();
         if allowed.as_ref().is_some_and(HashSet::is_empty) {

@@ -21,15 +21,24 @@ function fake(storage = 'opfs', fail = false, { fallback = false, noStats = fals
     worker = { terminate() { terminated++ } }
     async call(op, args) {
       calls.push({ op, args })
-      if (op === 'init') { opens++; this.cacheBytes = JSON.parse(args.configJson).vector_cache_bytes; return }
+      if (op === 'init') {
+        opens++
+        const config = JSON.parse(args.configJson)
+        this.baselineBytes = config.vector_cache_bytes ?? Math.max(1048576, Math.min(16777216, Math.floor((config.vector_cache_memory_bytes ?? 4 * 1024 ** 3) / 512)))
+        this.cacheBytes = this.baselineBytes
+        return
+      }
       if (op === 'close') { closes++; return }
       if (op === 'capabilities') return { storage }
       if (op === 'insertMany') { documents.push(...JSON.parse(args.docsJson)); return }
       if (op === 'createIndex') return
       const request = JSON.parse(args.requestJson)
-      if (request.op === 'cacheStats') {
+      if (request.op === 'memoryPressure') {
+        this.cacheBytes = request.level === 'critical' ? 0 : request.level === 'moderate' ? Math.floor(this.baselineBytes / 4) : this.baselineBytes
+      }
+      if (['cacheStats', 'memoryPressure'].includes(request.op)) {
         if (noStats) throw new Error('unknown op')
-        return { budgetBytes: this.cacheBytes, memoryBudgetBytes: Math.max(this.cacheBytes, 65536), retainedBytes: Math.min(this.cacheBytes, 2048), activeBytes: leak ? 1 : 0, peakBytes: Math.max(this.cacheBytes, 65536) }
+        return { budgetBytes: this.cacheBytes, baselineBudgetBytes: this.baselineBytes, memoryBudgetBytes: Math.max(this.cacheBytes, 65536), retainedBytes: Math.min(this.cacheBytes, 2048), activeBytes: leak ? 1 : 0, peakBytes: Math.max(this.cacheBytes, 65536) }
       }
       if (request.op === 'create') return
       if (request.op === 'beginBuild') { this.processed = 0; return { id: 'build' } }
@@ -82,6 +91,21 @@ test('worker workload uses configured cache, staged builds, persisted reopen and
   assert.ok(f.calls.filter(c => c.op === 'init').every(c => JSON.parse(c.args.configJson).vector_cache_bytes === config.cacheBytes))
   const builds = f.calls.filter(c => c.op === 'vectorCommand').map(c => JSON.parse(c.args.requestJson)).filter(c => c.op === 'stepBuild')
   assert.ok(builds.every(c => c.batchSize === 32))
+})
+
+test('adaptive browser profiles verify pressure, zero retention and recovery budgets', async () => {
+  const f = fake()
+  const config = settings('count=100&dims=8&queries=2&cache-bytes=auto&memory-hint-bytes=2147483648&pressure=1')
+  const report = await runVectorBenchmark(config, { Client: f.Client, memory: async () => null })
+  assert.equal(config.cacheBytes, null)
+  assert.deepEqual(report.pressureCycle.map(row => row.level), ['normal', 'moderate', 'critical', 'normal'])
+  assert.deepEqual(report.pressureCycle.map(row => row.cacheStats.budgetBytes), [4194304, 1048576, 0, 4194304])
+  assert.equal(report.pressureCycle[2].cacheStats.retainedBytes, 0)
+  assert.ok(report.pressureCycle.every(row => row.recallAtK === 1 && row.cacheStats.activeBytes === 0))
+  const configJson = JSON.parse(f.calls.find(c => c.op === 'init').args.configJson)
+  assert.equal(configJson.vector_cache_bytes, undefined)
+  assert.equal(configJson.vector_cache_memory_bytes, 2147483648)
+  for (const invalid of ['pressure=yes', 'memory-hint-bytes=0', 'memory-hint-bytes=Infinity']) assert.throws(() => settings(invalid))
 })
 
 test('unavailable OPFS and failed queries reject and close their workers', async () => {

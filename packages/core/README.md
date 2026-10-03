@@ -8,7 +8,7 @@ network. The same engine powers TalaDB in the browser, Node.js, React Native,
 Android and iOS, so data and queries behave identically everywhere.
 
 - **Docs:** <https://taladb.dev/guide/rust> · **API:** <https://docs.rs/taladb>
-- **Repository:** <https://github.com/tala-io/taladb>
+- **Repository:** <https://github.com/taladb/taladb>
 
 > **Early release.** The Rust crate is new: its API may still change between
 > minor versions before 1.0.

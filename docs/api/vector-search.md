@@ -145,9 +145,9 @@ AND filters use bounded previews of up to 64 keys per indexed branch to choose a
 
 Multiple comparisons on a field share narrower scans only when transactional index metadata confirms that the field has no array-valued documents. Array fields keep independent comparisons because different elements can satisfy each bound. Indexes created or rebuilt with this release have that metadata. Older indexes without it stay conservative; dropping and recreating an index enables scalar narrowing. Residual predicates still require document fields.
 
-Vector filter execution retains at most 256 IDs per intermediate branch or union. Larger matches stream from unique index keys when covered; array unions, residual predicates and other shapes stream document projections instead. Residual AND predicates retain an available unique index seed. Text predicates use bounded posting-list previews before projected document checks. Exact search reuses an existing decoded-vector block or reads bounded batches from that stream. Nearby IDs use short ordered scans; scattered IDs fall back to point reads after a bounded scan. Smaller filters keep the sparse point-read or dense scan/cache path. Filtered searches do not populate the full decoded-vector cache. Filter keys, vectors and returned documents all come from the same read snapshot.
+Vector filter execution retains at most 256 IDs per intermediate branch or union for exact search, and one ID per KiB of the current search budget (at least 256) for ANN, so memory pressure lowers the ANN limit too. Nested branches under a selected AND seed stop earlier, at 16 IDs per seed ID. Larger matches stream from unique index keys when covered; array unions, residual predicates and other shapes stream document projections instead. Residual AND predicates retain an available unique index seed. Text predicates use bounded posting-list previews before projected document checks. Exact search reuses an existing decoded-vector block or reads bounded batches from that stream. Nearby IDs use short ordered scans; scattered IDs fall back to point reads after a bounded scan. Smaller filters keep the sparse point-read or dense scan/cache path. Filtered searches do not populate the full decoded-vector cache. Filter keys, vectors and returned documents all come from the same read snapshot.
 
-Large filtered ANN queries use a compact eligibility bitmap indexed by graph-node ordinal. The bitmap counts toward the active graph reservation, leaving less allowance for decoded nodes and traversal buffers. Graphs with many historical ordinals can need a larger bitmap; if it cannot fit, search falls back to exact with `execution.reason: 'memoryBudget'`.
+Large filtered ANN queries use a compact eligibility bitmap indexed by graph-node ordinal. Building it reads one document-to-node mapping per match, which is why moderate filters keep the ID set. The bitmap counts toward the active graph reservation, leaving less allowance for decoded nodes and traversal buffers. Graphs with many historical ordinals can need a larger bitmap; if it cannot fit, search falls back to exact with `execution.reason: 'memoryBudget'`.
 
 `efSearch` defaults to 100. The effective candidate count is at least `(offset + topK) * oversampling`; oversampling defaults to 4 and accepts 1–100. Grouped ANN expands the pool when necessary. Every returned ANN score is recomputed from the original f32 vector in the same read snapshot as the filter and document.
 
@@ -201,8 +201,18 @@ Measurement compares ANN with exact top-k using the same database snapshot. Use 
 ## Search memory budget
 
 Exact vectors, decoded graph nodes and active ANN traversal buffers share one
-estimated memory allowance per database: 8 MiB on Android, iOS and WASM;
-64 MiB on other native targets.
+estimated memory allowance per database. With a host memory hint, adaptive sizing
+uses 1/512 of that hint, clamped to 1–16 MiB on Android, iOS and WASM, or
+1–64 MiB on other native targets. Without a hint, the fallback is 8 MiB on
+Android, iOS and WASM, or 64 MiB elsewhere. These are conservative starting
+values per database; account for other databases, embedding models and storage
+in the application's total budget.
+
+The browser worker reads approximate device RAM from
+[`navigator.deviceMemory`](https://www.w3.org/TR/device-memory/) when available.
+This is a capability hint, not currently free RAM. Other hosts, and browsers
+without that API, can supply `vector_cache_memory_bytes` in the opening config.
+An explicit `vector_cache_bytes` takes precedence over hints.
 Configure a budget for your application's available memory when opening Node
 or browser databases:
 
@@ -220,6 +230,43 @@ ANN walks when the configured budget is smaller. Existing collection handles
 observe budget changes; active loans finish under their original allowance.
 Reducing the budget prevents new admissions until those loans return.
 
+Cache controls on any collection apply to its whole database:
+
+```ts
+await articles.setVectorCacheAdaptive(2 * 1024 ** 3) // 2 GiB hint → 4 MiB baseline
+await articles.notifyMemoryPressure('moderate')     // one quarter of baseline
+await articles.notifyMemoryPressure('critical')     // evict retained caches
+await articles.notifyMemoryPressure('normal')       // explicit recovery
+await articles.setVectorCacheBudget(8 * 1024 ** 2)   // switch to a fixed baseline
+const stats = await articles.vectorCacheStats()
+```
+
+Pressure applies to fixed and adaptive baselines. Critical pressure disables
+retention and keeps the shared 64 KiB workspace; larger walks fall back to exact.
+Changing the baseline while pressure is active keeps that pressure reduction.
+Repeated identical signals do not evict caches again. Recovery is explicit:
+neither elapsed time nor returning to the foreground proves that memory is free.
+`setVectorCacheAdaptive()` without a hint restores the platform fallback.
+Rust hosts use `set_vector_cache_adaptive(Some(memory_bytes))` and
+`notify_memory_pressure(MemoryPressure::Critical)`.
+
+Applications forward platform signals; TalaDB does not poll process memory or
+install native OS listeners. For example, React Native exposes
+[`AppState.memoryWarning` on iOS](https://reactnative.dev/docs/appstate#memorywarning).
+Register once per database, handle errors, and remove the listener on cleanup:
+
+```ts
+const subscription = AppState.addEventListener('memoryWarning', () => {
+  articles.notifyMemoryPressure('critical').catch(reportError)
+})
+// On teardown:
+subscription.remove()
+```
+
+Android hosts can forward trim-memory signals through the same command API.
+Browser hosts should forward only signals they actually have; a hidden tab
+alone does not indicate memory pressure. No automatic recovery is inferred.
+
 Retained caches, pinned exact-vector blocks, full-vector cache construction and
 concurrent graph loans share this allowance. A walk reserves at most three
 quarters of what is free, so walks that start while it runs still get room; its
@@ -232,14 +279,14 @@ approximate ranking, and the fallback can take longer.
 
 Rust cache statistics, also available through the binding command
 `{ op: 'cacheStats' }`, include `retainedBytes`, `activeBytes`,
-`memoryBudgetBytes` and `peakBytes` in JSON. Active and peak bytes conservatively
+`memoryBudgetBytes` and `peakBytes` in JSON, plus `policy`, `memoryHintBytes`,
+`pressure` and `baselineBudgetBytes`. `budgetBytes` is the effective allowance
+under the current pressure. Active and peak bytes conservatively
 charge the full reservation of a graph loan or vector-cache builder. They are
 accounting estimates, not measured heap use or RSS. Peak resets when the budget
 is set. Large-filter ANN bitmaps count toward the graph reservation. Capped
 filter ID sets, page windows and group keys, result documents, transient record
 decoding, rebuild scratch and storage-engine caches use additional memory.
-Device memory is not automatically detected; provide an application budget
-when the default is too large or too small.
 
 ## Pairing with on-device embedding models
 

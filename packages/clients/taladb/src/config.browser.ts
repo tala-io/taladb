@@ -23,6 +23,8 @@ export interface SyncConfig {
 
 export interface TalaDbConfig {
   vector_cache_bytes?: number;
+  /** Device/host memory hint in bytes for adaptive sizing; fixed budgets take precedence. */
+  vector_cache_memory_bytes?: number;
   sync?: SyncConfig;
 }
 
@@ -38,6 +40,9 @@ const ENDPOINT_FIELDS = [
 ] as const;
 
 export function validateConfig(config: TalaDbConfig): void {
+  if (config.vector_cache_memory_bytes !== undefined && (!Number.isSafeInteger(config.vector_cache_memory_bytes) || config.vector_cache_memory_bytes <= 0)) {
+    throw new Error("TalaDB config: vector_cache_memory_bytes must be a positive safe integer");
+  }
   if (config.vector_cache_bytes !== undefined && (!Number.isSafeInteger(config.vector_cache_bytes) || config.vector_cache_bytes < 0)) {
     throw new Error("TalaDB config: vector_cache_bytes must be a nonnegative safe integer");
   }

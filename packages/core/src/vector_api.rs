@@ -14,6 +14,15 @@ use serde_json::{Value as Json, json};
 )]
 enum Command {
     CacheStats,
+    CacheBudget {
+        bytes: usize,
+    },
+    CacheAdaptive {
+        memory_bytes: Option<u64>,
+    },
+    MemoryPressure {
+        level: crate::MemoryPressure,
+    },
     Create {
         field: String,
         dimensions: usize,
@@ -152,6 +161,30 @@ impl Collection {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .stats()
             ),
+            Command::CacheBudget { bytes } => {
+                let mut cache = self
+                    .node_cache()
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                cache.set_budget(bytes);
+                json!(cache.stats())
+            }
+            Command::CacheAdaptive { memory_bytes } => {
+                let mut cache = self
+                    .node_cache()
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                cache.set_adaptive(memory_bytes)?;
+                json!(cache.stats())
+            }
+            Command::MemoryPressure { level } => {
+                let mut cache = self
+                    .node_cache()
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                cache.notify_pressure(level);
+                json!(cache.stats())
+            }
             Command::Create {
                 field,
                 dimensions,
@@ -743,7 +776,7 @@ impl Collection {
         let allowed = if ann {
             filter
                 .as_ref()
-                .map(|f| self.bounded_vector_ids_in(txn, f))
+                .map(|f| self.bounded_vector_ids_in(txn, f, self.ann_filter_id_limit()))
                 .transpose()?
                 .flatten()
         } else {

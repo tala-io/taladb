@@ -103,6 +103,9 @@ pub(super) fn resolve(
 // A capped preview estimates whether a branch is cheaper to enumerate than
 // to probe for an existing, smaller candidate set. It never changes eligibility.
 const PREVIEW_KEYS: usize = 64;
+// Nested branches under a selected AND seed stop at this many IDs per seed ID.
+const SEED_FANOUT: usize = 16;
+const MIN_NESTED_IDS: usize = 256;
 
 struct Branch<'a> {
     plan: QueryPlan,
@@ -300,7 +303,17 @@ fn resolve_and(
         if result.as_ref().is_some_and(|r| r.ids.is_empty()) {
             break;
         }
-        let next = match resolve(child, indexes, compounds, txn, collection, limit) {
+        // Past a small multiple of the seed, reading the seed's documents is
+        // cheaper than enumerating the nested branch, however large the limit.
+        let nested_limit = result.as_ref().map_or(limit, |seed| {
+            limit.min(
+                seed.ids
+                    .len()
+                    .saturating_mul(SEED_FANOUT)
+                    .max(MIN_NESTED_IDS),
+            )
+        });
+        let next = match resolve(child, indexes, compounds, txn, collection, nested_limit) {
             // A broad nested branch must not discard a small seed already
             // selected by this AND. Check the remaining predicate on that seed.
             Err(ResolveError::Limit) if result.is_some() => {

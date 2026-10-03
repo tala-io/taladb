@@ -30,4 +30,4 @@ export type {
 } from './types';
 
 export { createVectorClient } from './vector-client';
-export type { VectorClient, VectorQueryOptions, VectorRebuildOptions, VectorBuildProgress, VectorIndexStatus, VectorQueryResult, VectorRecall, VectorGraphOptions, VectorQuantization } from './vector-client';
+export type { MemoryPressure, VectorCacheStats, VectorClient, VectorQueryOptions, VectorRebuildOptions, VectorBuildProgress, VectorIndexStatus, VectorQueryResult, VectorRecall, VectorGraphOptions, VectorQuantization } from './vector-client';

@@ -144,9 +144,9 @@ impl WorkerDB {
         if let Some(json) = config_json {
             let config: taladb_core::TalaDbConfig = serde_json::from_str(&json)
                 .map_err(|e| JsValue::from_str(&format!("invalid config JSON: {e}")))?;
-            if let Some(bytes) = config.vector_cache_bytes {
-                db.set_vector_cache_budget(bytes);
-            }
+            config
+                .apply_vector_cache(&db)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
         }
         Ok(Self { db })
     }
@@ -249,9 +249,9 @@ impl WorkerDB {
         if let Some(json) = config_json {
             let config: taladb_core::TalaDbConfig = serde_json::from_str(&json)
                 .map_err(|e| JsValue::from_str(&format!("invalid config JSON: {e}")))?;
-            if let Some(bytes) = config.vector_cache_bytes {
-                db.set_vector_cache_budget(bytes);
-            }
+            config
+                .apply_vector_cache(&db)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
         }
         Ok(Self { db })
     }

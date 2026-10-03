@@ -9,12 +9,15 @@ export function settings(search) {
   }
   const quantization = params.get('quantization') ?? 'binary'
   if (!['none', 'scalar', 'binary'].includes(quantization)) throw new Error('invalid quantization')
+  if (params.has('pressure') && !['0', '1'].includes(params.get('pressure'))) throw new Error('invalid pressure')
   return {
     count: integer('count', 2000, 100, 100000),
     dimensions: integer('dims', 128, 1, 4096),
     queries: integer('queries', 30, 1, 1000),
     concurrency: integer('concurrency', 4, 1, 16),
-    cacheBytes: integer('cache-bytes', 8 * 1024 * 1024, 0, 256 * 1024 * 1024),
+    cacheBytes: params.get('cache-bytes') === 'auto' ? null : integer('cache-bytes', 8 * 1024 * 1024, 0, 256 * 1024 * 1024),
+    memoryHintBytes: params.has('memory-hint-bytes') ? integer('memory-hint-bytes', null, 1, Number.MAX_SAFE_INTEGER) : null,
+    memoryPressure: params.get('pressure') === '1',
     quantization,
     m: 8, efConstruction: 64, batchSize: 32, topK: 10, seed: 42,
   }
@@ -65,7 +68,10 @@ export async function runVectorBenchmark(config, {
 } = {}) {
   const { documents, probes } = dataset(config)
   const dbName = `vector-bench-${Date.now()}-${Math.random().toString(36).slice(2)}.db`
-  const configJson = JSON.stringify({ vector_cache_bytes: config.cacheBytes })
+  const configJson = JSON.stringify({
+    ...(config.cacheBytes !== null ? { vector_cache_bytes: config.cacheBytes } : {}),
+    ...(config.memoryHintBytes !== null ? { vector_cache_memory_bytes: config.memoryHintBytes } : {}),
+  })
   let client
   const decode = value => typeof value === 'string' ? JSON.parse(value) : value
   const command = request => client.call('vectorCommand', { collection: 'vectors', requestJson: JSON.stringify(request) }).then(decode)
@@ -221,9 +227,47 @@ export async function runVectorBenchmark(config, {
         progress(`${filter.name} ${mode} ef=${efSearch}: ${cases.at(-1).p50Ms.toFixed(2)} ms`)
       }
     }
+    const pressureCycle = []
+    if (config.memoryPressure) {
+      const filter = filters[2] // dense grouped pagination, including bitmap eligibility
+      const truth = await Promise.all(probes.map(query => search(query, filter, 'exact', 200)))
+      let normalRecall = null
+      for (const level of ['normal', 'moderate', 'critical', 'normal']) {
+        const before = await command({ op: 'memoryPressure', level })
+        const target = level === 'normal' ? before.baselineBudgetBytes : level === 'moderate' ? Math.floor(before.baselineBudgetBytes / 4) : 0
+        if (before.budgetBytes !== target) throw new Error(`pressure budget mismatch: ${level}`)
+        let recall = 0, memoryFallbacks = 0
+        const times = []
+        for (let i = 0; i < probes.length; i++) {
+          const start = now(), result = await search(probes[i], filter, 'ann', 200)
+          times.push(now() - start)
+          const groups = new Map(), seen = new Set()
+          for (const hit of result.hits) {
+            const doc = hit.document, count = (groups.get(doc.tenant) ?? 0) + 1
+            if (!doc.active || seen.has(doc.ordinal) || count > filter.options.groupSize) throw new Error(`pressure filter/group mismatch: ${level}`)
+            seen.add(doc.ordinal); groups.set(doc.tenant, count)
+          }
+          if (result.hits.length !== truth[i].hits.length) throw new Error(`pressure result count mismatch: ${level}`)
+          const ids = new Set(truth[i].hits.map(hit => hit.document.ordinal))
+          recall += ids.size ? result.hits.filter(hit => ids.has(hit.document.ordinal)).length / ids.size : 1
+          if (result.execution.reason === 'memoryBudget') {
+            memoryFallbacks++
+            const ranked = hits => JSON.stringify(hits.map(hit => [hit.document.ordinal, hit.score]))
+            if (ranked(result.hits) !== ranked(truth[i].hits)) throw new Error(`pressure fallback differs from exact: ${level}`)
+          } else if (result.execution.path !== 'hnsw') throw new Error('pressure ANN was not used')
+        }
+        const stats = await command({ op: 'cacheStats' })
+        if (stats.activeBytes || stats.retainedBytes > target || stats.peakBytes > stats.memoryBudgetBytes) throw new Error(`pressure allowance leaked or exceeded: ${level}`)
+        const recallAtK = recall / probes.length
+        if (normalRecall === null) normalRecall = recallAtK
+        if (recallAtK + 0.03 < normalRecall) throw new Error(`pressure recall fell: ${level}`)
+        pressureCycle.push({ level, ...percentiles(times), recallAtK, memoryFallbacks, cacheStats: stats })
+        progress(`pressure ${level}: ${times.length} queries, ${memoryFallbacks} memory fallbacks`)
+      }
+    }
     const originMemoryAfterBytes = await memory()
     return { schema: 2, workload: 'browser-vector', config, capabilities, insertMs, buildMs,
-      buildStep: { ...percentiles(steps), count: steps.length }, cases,
+      buildStep: { ...percentiles(steps), count: steps.length }, cases, pressureCycle,
       originMemoryBeforeBytes, originMemoryAfterBytes }
   } finally {
     await close()

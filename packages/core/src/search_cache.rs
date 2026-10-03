@@ -13,6 +13,30 @@ pub(crate) const DEFAULT_SEARCH_CACHE_BYTES: usize = 8 * 1024 * 1024;
 #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
 pub(crate) const DEFAULT_SEARCH_CACHE_BYTES: usize = 64 * 1024 * 1024;
 
+#[cfg(any(target_arch = "wasm32", target_os = "android", target_os = "ios"))]
+const MAX_ADAPTIVE_BYTES: u64 = 16 * 1024 * 1024;
+#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
+const MAX_ADAPTIVE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Host-reported pressure, independent of the configured normal budget.
+/// Recovery is explicit: a timer or app foreground event does not prove that
+/// memory pressure has ended.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MemoryPressure {
+    #[default]
+    Normal,
+    Moderate,
+    Critical,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum VectorCachePolicy {
+    Adaptive,
+    Fixed,
+}
+
 /// Estimated decoded search allocations. Reservations conservatively charge the
 /// full allowance of active graph loans (including large-filter bitmaps) and
 /// vector-block construction. Capped filter ID sets, page windows/group keys,
@@ -21,6 +45,10 @@ pub(crate) const DEFAULT_SEARCH_CACHE_BYTES: usize = 64 * 1024 * 1024;
 #[serde(rename_all = "camelCase")]
 pub struct VectorCacheStats {
     pub budget_bytes: usize,
+    pub baseline_budget_bytes: usize,
+    pub policy: VectorCachePolicy,
+    pub memory_hint_bytes: Option<u64>,
+    pub pressure: MemoryPressure,
     pub retained_bytes: usize,
     pub memory_budget_bytes: usize,
     pub active_bytes: usize,
@@ -50,6 +78,10 @@ pub(crate) type SharedSearchCache = Arc<Mutex<SearchCache>>;
 pub(crate) struct SearchCache {
     entries: HashMap<String, Entry>,
     budget: usize,
+    baseline_budget: usize,
+    policy: VectorCachePolicy,
+    memory_hint: Option<u64>,
+    pressure: MemoryPressure,
     clock: u64,
     active: Arc<AtomicUsize>,
     vector_loans: Vec<Weak<VectorBlock>>,
@@ -62,6 +94,10 @@ impl Default for SearchCache {
         Self {
             entries: HashMap::new(),
             budget: DEFAULT_SEARCH_CACHE_BYTES,
+            baseline_budget: DEFAULT_SEARCH_CACHE_BYTES,
+            policy: VectorCachePolicy::Adaptive,
+            memory_hint: None,
+            pressure: MemoryPressure::Normal,
             clock: 0,
             active: Arc::new(AtomicUsize::new(0)),
             vector_loans: Vec::new(),
@@ -152,6 +188,10 @@ impl SearchCache {
     pub fn stats(&self) -> VectorCacheStats {
         VectorCacheStats {
             budget_bytes: self.budget,
+            baseline_budget_bytes: self.baseline_budget,
+            policy: self.policy,
+            memory_hint_bytes: self.memory_hint,
+            pressure: self.pressure,
             memory_budget_bytes: self.memory_budget(),
             active_bytes: self.active_bytes(),
             peak_bytes: self.peak,
@@ -169,6 +209,45 @@ impl SearchCache {
         }
     }
     pub fn set_budget(&mut self, budget: usize) {
+        self.policy = VectorCachePolicy::Fixed;
+        self.memory_hint = None;
+        self.baseline_budget = budget;
+        self.apply_budget(self.pressure_budget());
+    }
+    pub fn set_adaptive(&mut self, memory_bytes: Option<u64>) -> Result<(), crate::TalaDbError> {
+        if memory_bytes == Some(0) {
+            return Err(crate::TalaDbError::InvalidOperation(
+                "memory hint must be positive".into(),
+            ));
+        }
+        self.policy = VectorCachePolicy::Adaptive;
+        self.memory_hint = memory_bytes;
+        // Approximately 0.2% of the host's memory hint, capped per database.
+        // Clamp before converting: WASM32 can receive hints above 4 GiB.
+        self.baseline_budget = memory_bytes.map_or(DEFAULT_SEARCH_CACHE_BYTES, |bytes| {
+            (bytes / 512).clamp(1024 * 1024, MAX_ADAPTIVE_BYTES) as usize
+        });
+        self.apply_budget(self.pressure_budget());
+        Ok(())
+    }
+    pub fn notify_pressure(&mut self, pressure: MemoryPressure) {
+        if self.pressure == pressure {
+            return;
+        }
+        self.pressure = pressure;
+        let budget = self.pressure_budget();
+        if budget != self.budget {
+            self.apply_budget(budget);
+        }
+    }
+    fn pressure_budget(&self) -> usize {
+        match self.pressure {
+            MemoryPressure::Normal => self.baseline_budget,
+            MemoryPressure::Moderate => self.baseline_budget / 4,
+            MemoryPressure::Critical => 0,
+        }
+    }
+    fn apply_budget(&mut self, budget: usize) {
         self.budget = budget;
         self.epoch = self.epoch.wrapping_add(1);
         self.trim(0);
@@ -335,6 +414,62 @@ impl Drop for MemoryReservation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn adaptive_hints_are_capped_and_pressure_is_idempotent_with_explicit_recovery() {
+        let mut cache = SearchCache::default();
+        for (hint, expected) in [
+            (1, 1024 * 1024),
+            (512 * 1024 * 1024, 1024 * 1024),
+            (2 * 1024 * 1024 * 1024, 4 * 1024 * 1024),
+            (u64::MAX, MAX_ADAPTIVE_BYTES as usize),
+        ] {
+            cache.set_adaptive(Some(hint)).unwrap();
+            assert_eq!(cache.stats().baseline_budget_bytes, expected);
+            assert_eq!(cache.budget(), expected);
+            assert_eq!(cache.stats().policy, VectorCachePolicy::Adaptive);
+        }
+        let before = cache.stats();
+        assert!(cache.set_adaptive(Some(0)).is_err());
+        assert_eq!(cache.stats().memory_hint_bytes, before.memory_hint_bytes);
+        assert_eq!(cache.budget(), before.budget_bytes);
+        cache.set_budget(8 * 1024 * 1024);
+        cache.insert_vectors("a", 1, block(128 * 1024), cache.epoch);
+        cache.notify_pressure(MemoryPressure::Moderate);
+        assert_eq!(cache.budget(), 2 * 1024 * 1024);
+        assert_eq!(cache.stats().retained_bytes, 0);
+        let epoch = cache.epoch;
+        cache.notify_pressure(MemoryPressure::Moderate);
+        assert_eq!(cache.epoch, epoch);
+        cache.notify_pressure(MemoryPressure::Critical);
+        assert_eq!(cache.budget(), 0);
+        assert_eq!(cache.memory_budget(), 64 * 1024);
+        // Changing policy while pressure is active must not restore retention.
+        cache.set_adaptive(Some(2 * 1024 * 1024 * 1024)).unwrap();
+        assert_eq!(cache.budget(), 0);
+        cache.notify_pressure(MemoryPressure::Normal);
+        assert_eq!(cache.budget(), 4 * 1024 * 1024);
+        cache.set_adaptive(None).unwrap();
+        assert_eq!(cache.budget(), DEFAULT_SEARCH_CACHE_BYTES);
+    }
+
+    #[test]
+    fn pressure_invalidates_returning_loans_and_preserves_live_accounting() {
+        let mut cache = SearchCache::default();
+        cache.set_budget(1024 * 1024);
+        let epoch = cache.epoch;
+        let loan = cache.reserve_graph(0);
+        cache.notify_pressure(MemoryPressure::Critical);
+        assert_eq!(cache.stats().active_bytes, 768 * 1024);
+        assert!(cache.reserve(1).is_none());
+        assert_eq!(cache.reserve_graph(0).bytes, 0);
+        cache.notify_pressure(MemoryPressure::Normal);
+        drop(loan);
+        cache.insert_vectors("obsolete", 1, block(10), epoch);
+        assert_eq!(cache.stats().retained_bytes, 0);
+        cache.insert_vectors("fresh", 1, block(10), cache.epoch);
+        assert!(cache.stats().retained_bytes > 0);
+        assert_eq!(cache.stats().active_bytes, 0);
+    }
     fn block(n: usize) -> VectorBlock {
         VectorBlock {
             ids: vec![ulid::Ulid::from(1); n],

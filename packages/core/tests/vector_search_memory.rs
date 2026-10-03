@@ -8,8 +8,8 @@ use std::sync::{
 use std::time::Duration;
 use taladb::engine::{KvPairs, ReadTxn, WriteTxn};
 use taladb::{
-    Database, Filter, GraphOptions, Quantization, RedbBackend, StorageBackend, TalaDbError, Value,
-    VectorQueryOptions, VectorSearchMode,
+    Database, Filter, GraphOptions, MemoryPressure, Quantization, RedbBackend, StorageBackend,
+    TalaDbError, Value, VectorQueryOptions, VectorSearchMode,
 };
 
 struct Gate {
@@ -231,4 +231,90 @@ fn read_errors_and_budget_reduction_release_the_live_loan() {
     ));
     assert_eq!(db.vector_cache_stats().active_bytes, 0);
     assert_eq!(db.vector_cache_stats().retained_bytes, 0);
+}
+
+#[test]
+fn pressure_during_ann_releases_obsolete_caches_and_explicit_recovery_restores_search() {
+    let (db, gate, entered, resume) = setup(128);
+    db.set_vector_cache_adaptive(Some(512 * 1024 * 1024))
+        .unwrap();
+    gate.armed.store(true, Ordering::SeqCst);
+    let col = db.collection("docs").unwrap();
+    let running = std::thread::spawn(move || {
+        col.search_vectors("v", &QUERY, 5, None, &opts(VectorSearchMode::Ann))
+            .unwrap()
+    });
+    entered.recv_timeout(Duration::from_secs(10)).unwrap();
+    db.notify_memory_pressure(MemoryPressure::Critical);
+    let stats = db.vector_cache_stats();
+    assert_eq!(stats.budget_bytes, 0);
+    assert_eq!(stats.active_bytes, 768 * 1024);
+    let col = db.collection("docs").unwrap();
+    let fallback = col
+        .search_vectors("v", &QUERY, 5, None, &opts(VectorSearchMode::Ann))
+        .unwrap();
+    assert_eq!(fallback.execution.reason, "memoryBudget");
+    let exact = col
+        .search_vectors("v", &QUERY, 5, None, &opts(VectorSearchMode::Exact))
+        .unwrap();
+    assert_eq!(signature(&fallback), signature(&exact));
+    resume.send(()).unwrap();
+    assert_eq!(running.join().unwrap().execution.path, "hnsw");
+    assert_eq!(db.vector_cache_stats().active_bytes, 0);
+    assert_eq!(db.vector_cache_stats().retained_bytes, 0);
+    db.notify_memory_pressure(MemoryPressure::Normal);
+    let recovered = col
+        .search_vectors("v", &QUERY, 5, None, &opts(VectorSearchMode::Ann))
+        .unwrap();
+    assert_eq!(recovered.execution.path, "hnsw");
+    let stats = db.vector_cache_stats();
+    assert_eq!(stats.budget_bytes, 1024 * 1024);
+    assert!(stats.retained_bytes > 0);
+    assert!(stats.peak_bytes <= stats.memory_budget_bytes);
+}
+
+#[test]
+fn binding_cache_commands_share_the_database_and_validate_before_mutation() {
+    use serde_json::json;
+    let db = Database::open_in_memory().unwrap();
+    let a = db.collection("a").unwrap();
+    let b = db.collection("b").unwrap();
+    let command = |col: &taladb::Collection, request| {
+        col.vector_command(request, &|_| Ok(Filter::All), &|_| json!(null))
+    };
+    assert_eq!(
+        command(
+            &a,
+            json!({"op":"cacheAdaptive","memoryBytes":8589934592u64})
+        )
+        .unwrap()["budgetBytes"],
+        16 * 1024 * 1024
+    );
+    assert_eq!(
+        command(&b, json!({"op":"memoryPressure","level":"moderate"})).unwrap()["budgetBytes"],
+        4 * 1024 * 1024
+    );
+    assert_eq!(
+        command(&a, json!({"op":"cacheBudget","bytes":1048576})).unwrap()["budgetBytes"],
+        262144
+    );
+    assert_eq!(
+        command(&b, json!({"op":"memoryPressure","level":"normal"})).unwrap()["budgetBytes"],
+        1048576
+    );
+    for request in [
+        json!({"op":"cacheAdaptive","memoryBytes":0}),
+        json!({"op":"cacheAdaptive","memoryBytes":-1}),
+        json!({"op":"cacheBudget","bytes":-1}),
+        json!({"op":"memoryPressure","level":"typo"}),
+        json!({"op":"memoryPressure","level":"critical","unknown":true}),
+    ] {
+        assert!(command(&a, request).is_err());
+        assert_eq!(db.vector_cache_stats().budget_bytes, 1048576);
+    }
+    let stats = command(&a, json!({"op":"cacheStats"})).unwrap();
+    assert_eq!(stats["baselineBudgetBytes"], 1048576);
+    assert_eq!(stats["policy"], "fixed");
+    assert_eq!(stats["pressure"], "normal");
+    assert_eq!(stats["memoryHintBytes"], json!(null));
 }

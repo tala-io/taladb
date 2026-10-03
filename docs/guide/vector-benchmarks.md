@@ -28,6 +28,21 @@ node scripts/bench-web.mjs --vectors --count 5000 --dims 384 \
   --queries 30 --quantization scalar --cache-bytes 1048576 --json
 ```
 
+To exercise adaptive sizing and pressure/recovery on the same browser or phone:
+
+```sh
+node scripts/bench-web.mjs --vectors --cache-bytes auto \
+  --memory-hint-bytes 2147483648 --pressure --json
+```
+
+This simulates a 2 GiB host hint and runs normal → moderate → critical → normal
+pressure after the timing suite. `pressureCycle` records latency, recall,
+fallbacks and cache accounting for dense grouped queries, and checks that
+retention is evicted and the baseline restored. These are injected signals,
+not an OS low-memory test. Omit `--memory-hint-bytes` to use the browser's hint
+when available, or its platform fallback. Fixed-budget profiles also support
+`--pressure`. Use `--serve` to run this profile manually on a phone.
+
 Results include build time and batch-step p50/p95 for 32-vector steps. For
 unfiltered queries, a 95% dense filter, dense grouped pagination, one group per
 document, a 10% tenant filter, a 1% bucket filter, a skewed AND intersection, a

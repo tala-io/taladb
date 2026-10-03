@@ -16,7 +16,7 @@ The Swift package is new. Its API may still change before it is published,
 and **no tagged SwiftPM release exists yet** — the prebuilt engine it links
 ships with an upcoming TalaDB release. To try it now, build it from source
 (see [below](#build-from-source)). Feedback and issues are welcome on
-[tala-io/taladb-swift](https://github.com/tala-io/taladb-swift).
+[taladb/taladb-swift](https://github.com/taladb/taladb-swift).
 :::
 
 ## Requirements
@@ -30,7 +30,7 @@ Once released, add the package:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/tala-io/taladb-swift", from: "<version>"),
+    .package(url: "https://github.com/taladb/taladb-swift", from: "<version>"),
 ],
 targets: [
     .target(name: "MyApp", dependencies: [.product(name: "TalaDB", package: "taladb-swift")]),
@@ -43,8 +43,8 @@ On a Mac with Rust installed, build the engine's xcframework from a checkout of
 this repository, then use the package locally:
 
 ```sh
-git clone https://github.com/tala-io/taladb
-git clone https://github.com/tala-io/taladb-swift
+git clone https://github.com/taladb/taladb
+git clone https://github.com/taladb/taladb-swift
 cd taladb-swift
 scripts/build-engine.sh ../taladb     # builds engine/TalaDBFFI.xcframework
 swift test
@@ -142,4 +142,4 @@ Swift calls the engine's C FFI directly — the prebuilt `TalaDBFFI.xcframework`
 carries the header and a module map, so no glue code is needed. At open the
 package checks that the library's C ABI version matches the one it was built
 for, so a mismatched engine fails with a clear error. Full API reference:
-[tala-io/taladb-swift](https://github.com/tala-io/taladb-swift).
+[taladb/taladb-swift](https://github.com/taladb/taladb-swift).

@@ -6,13 +6,14 @@ import assert from 'node:assert/strict';
 // The production worker runs unchanged except for its WASM import. This fake
 // engine/storage isolates ownership, async ordering, and acknowledgement logic.
 const source = readFileSync(new URL('../worker/taladb.worker.js', import.meta.url), 'utf8')
+  .replace("import { adaptiveConfigJson } from './cache-config.js';", readFileSync(new URL('../worker/cache-config.js', import.meta.url), 'utf8').replace('export function', 'function'))
   .replace(/let wasmReady;[\s\S]*?\}\)\(\); \}/, 'function loadWasm() { return Promise.resolve({ WorkerDB: MockDB }); }');
 class MockDB {
   constructor(snapshot) {
     Object.assign(this, snapshot ? JSON.parse(new TextDecoder().decode(snapshot)) : { docs: [], indexes: [], version: 0, generation: 0 });
   }
   static openWithSnapshot(bytes) { return new MockDB(bytes); }
-  static openWithConfigAndSnapshot(bytes) { return new MockDB(bytes); }
+  static openWithConfigAndSnapshot(bytes, config) { const db = new MockDB(bytes); db.config = JSON.parse(config); return db; }
   setDurability() {} flush() {} free() {}
   insert(_, json) {
     const doc = JSON.parse(json); doc._id ??= `id-${this.docs.length}`;
@@ -27,7 +28,7 @@ class MockDB {
   writeGeneration() { return this.generation; }
   exportSnapshot() { return new TextEncoder().encode(JSON.stringify(this)); }
 }
-function environment({ opfsError = false, readError = false } = {}) {
+function environment({ opfsError = false, readError = false, deviceMemory } = {}) {
   const channels = new Map(), locks = new Set(), waiting = new Map(), snapshots = new Map();
   let fail = false;
   class Channel {
@@ -35,7 +36,7 @@ function environment({ opfsError = false, readError = false } = {}) {
     postMessage(data) { for (const p of channels.get(this.name) ?? []) if (p !== this) queueMicrotask(() => p.onmessage?.({ data })); }
     close() { channels.get(this.name)?.delete(this); this.onmessage = null; }
   }
-  const navigator = { locks: { async request(name, options, callback) {
+  const navigator = { deviceMemory, locks: { async request(name, options, callback) {
     if (locks.has(name)) {
       if (options.ifAvailable) return callback(null);
       await new Promise((resolve, reject) => {
@@ -76,6 +77,22 @@ function environment({ opfsError = false, readError = false } = {}) {
     for (const w of workers.reverse()) await w.call('close').catch(() => {});
   } };
 }
+test('automatic cache hints reach the engine without changing multi-tab configuration identity', async () => {
+  const e = environment({ deviceMemory: 8 });
+  try {
+    const a = e.worker(), b = e.worker();
+    await a.call('init', { dbName: 'memory-test' });
+    assert.equal(a.run('db.config.vector_cache_memory_bytes'), 8 * 1024 ** 3);
+    assert.equal(a.run('activeConfigJson'), null);
+    await b.call('init', { dbName: 'memory-test' });
+    assert.equal(await b.call('isPrimary'), false);
+    await a.call('close');
+    for (let i = 0; i < 100 && !b.run('owner'); i++) await new Promise(r => setTimeout(r, 1));
+    assert.equal(b.run('owner'), true);
+    assert.equal(b.run('db.config.vector_cache_memory_bytes'), 8 * 1024 ** 3);
+  } finally { await e.close(); }
+});
+
 test('IDB fallback elects one owner and secondary requests receive authoritative results', async () => {
   const e = environment();
   try {

@@ -6,11 +6,11 @@ description: Planned and in-progress features for TalaDB
 # Roadmap
 
 What's planned for TalaDB, roughly in order of impact. Shipped work is recorded
-in the [changelog](https://github.com/tala-io/taladb/blob/main/CHANGELOG.md);
+in the [changelog](https://github.com/taladb/taladb/blob/main/CHANGELOG.md);
 this page tracks only what's still open.
 
 Have an idea, or want to help prioritise? Open a
-[GitHub Discussion](https://github.com/tala-io/taladb/discussions) or a feature
+[GitHub Discussion](https://github.com/taladb/taladb/discussions) or a feature
 request issue.
 
 ---
@@ -45,8 +45,10 @@ JavaScript runtime.
 - **Better approximate-search recall at scale** — improve candidate selection
   and graph connectivity, validated against exact search on larger collections
   and representative embedding datasets.
-- **Adaptive cache sizing** — adapt the shared, configurable vector/graph
-  budget to platform memory-pressure signals.
+- **Automatic native memory signals** — connect Android/iOS memory hints and
+  pressure callbacks in the native packages. Adaptive cache sizing, browser
+  device-memory hints and explicit pressure/recovery commands already ship;
+  native hosts currently forward signals themselves.
 - **Wider native SIMD** — a runtime-detected AVX2/NEON kernel on top of the
   portable vectorisation already in place.
 - **Index tuning guidance by device class** — recommended parameters from

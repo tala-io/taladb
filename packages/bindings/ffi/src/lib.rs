@@ -360,7 +360,7 @@ pub unsafe extern "C" fn taladb_open_with_config(
 
         let mut passphrase: Option<String> = None;
         let mut durability_eventual = false;
-        let mut vector_cache_bytes = None;
+        let mut vector_config = TalaDbConfig::default();
         if !config_json.is_null() {
             let json_str = match unsafe { CStr::from_ptr(config_json) }.to_str() {
                 Ok(s) => s,
@@ -389,7 +389,7 @@ pub unsafe extern "C" fn taladb_open_with_config(
             match serde_json::from_value::<TalaDbConfig>(value) {
                 Ok(config) => {
                     durability_eventual = !config.durability.flush_every_write;
-                    vector_cache_bytes = config.vector_cache_bytes;
+                    vector_config = config;
                 }
                 Err(e) => {
                     set_last_error(format!("invalid config JSON: {e}"));
@@ -405,8 +405,9 @@ pub unsafe extern "C" fn taladb_open_with_config(
         match opened {
             Ok(db) => {
                 db.set_durability(durability_eventual);
-                if let Some(bytes) = vector_cache_bytes {
-                    db.set_vector_cache_budget(bytes);
+                if let Err(e) = vector_config.apply_vector_cache(&db) {
+                    set_last_error(engine_error(e));
+                    return std::ptr::null_mut();
                 }
                 Box::into_raw(Box::new(TalaDbHandle { db }))
             }
@@ -2912,6 +2913,27 @@ mod tests {
         let handle = unsafe { taladb_open_with_config(path.as_ptr(), config.as_ptr()) };
         assert!(!handle.is_null());
         assert_eq!(unsafe { &*handle }.db.vector_cache_stats().budget_bytes, 0);
+        unsafe { taladb_close(handle) };
+    }
+
+    #[test]
+    fn open_with_config_applies_adaptive_hints_and_rejects_zero_before_opening() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = CString::new(dir.path().join("adaptive.db").to_str().unwrap()).unwrap();
+        let invalid = CString::new(r#"{"vector_cache_memory_bytes":0}"#).unwrap();
+        // SAFETY: both C strings stay alive for the call.
+        let handle = unsafe { taladb_open_with_config(path.as_ptr(), invalid.as_ptr()) };
+        assert!(handle.is_null());
+        assert!(!dir.path().join("adaptive.db").exists());
+        let config = CString::new(r#"{"vector_cache_memory_bytes":8589934592}"#).unwrap();
+        // SAFETY: both C strings stay alive for the call.
+        let handle = unsafe { taladb_open_with_config(path.as_ptr(), config.as_ptr()) };
+        assert!(!handle.is_null());
+        // SAFETY: successful open owns a live handle until close below.
+        let stats = unsafe { &*handle }.db.vector_cache_stats();
+        assert_eq!(stats.budget_bytes, 16 * 1024 * 1024);
+        assert_eq!(stats.memory_hint_bytes, Some(8589934592));
+        // SAFETY: no outstanding references or jobs access this handle.
         unsafe { taladb_close(handle) };
     }
 
