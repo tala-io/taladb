@@ -7,7 +7,8 @@ const post = (kind, body) => fetch(`/__bench/${kind}`, {
 const progress = msg => { log.textContent += `\n${msg}`; post('progress', { msg }) }
 
 async function main() {
-  const report = await runVectorBenchmark(settings(location.search), { progress })
+  const baseline = new URLSearchParams(location.search).get('baseline') === '1'
+  const report = await runVectorBenchmark(settings(location.search), { progress, baseline })
   report.ua = navigator.userAgent
   report.device = { hardwareConcurrency: navigator.hardwareConcurrency, deviceMemoryGiB: navigator.deviceMemory ?? null }
   report.measuredAt = new Date().toISOString()

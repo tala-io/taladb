@@ -16,6 +16,7 @@ export function aggregate(samples) {
   for (const key of ['insertMs', 'buildMs']) report[key] = median(samples.map(s => s[key]))
   for (const key of ['p50Ms', 'p95Ms']) report.buildStep[key] = median(samples.map(s => s.buildStep[key]))
   report.cases.forEach((row, i) => {
+    if (row.incorrect) return
     for (const key of ['reopenMs', 'firstQueryMs', 'p50Ms', 'p95Ms']) row[key] = median(samples.map(s => s.cases[i][key]))
     if (row.burst) {
       for (const key of ['p50Ms', 'p95Ms', 'memoryFallbacks']) row.burst[key] = median(samples.map(s => s.cases[i].burst[key]))
@@ -29,6 +30,11 @@ export function aggregate(samples) {
   return report
 }
 
+// Cases the baseline answered wrongly: reported, not compared.
+export function incorrectBaseline(before) {
+  return [...new Set(before.cases.filter(row => row.incorrect).map(row => `${row.filter}: ${row.incorrect}`))]
+}
+
 export function compare(before, after) {
   const failures = []
   if (JSON.stringify(before.config) !== JSON.stringify(after.config)
@@ -40,6 +46,9 @@ export function compare(before, after) {
     const old = before.cases[i], row = after.cases[i]
     const label = `${row.filter} ${row.mode ?? "ann"} ef=${row.efSearch}`
     if (row.filter !== old.filter || row.mode !== old.mode || row.efSearch !== old.efSearch) { failures.push('workload cases changed'); continue }
+    if (row.incorrect) { failures.push(`${label}: ${row.incorrect}`); continue }
+    // The baseline predates a correctness fix; it has no timings to compare.
+    if (old.incorrect) continue
     if (row.cacheStats && (row.cacheStats.activeBytes !== 0 || row.cacheStats.peakBytes > row.cacheStats.memoryBudgetBytes || row.cacheStats.retainedBytes > row.cacheStats.budgetBytes)) failures.push(`${label}: search memory exceeded allowance or leaked`)
     if (row.recallAtK + 0.03 < old.recallAtK) failures.push(`${label}: recall fell by more than 3 percentage points`)
     if (row.p50Ms > Math.max(old.p50Ms * 1.5, old.p50Ms + 0.5)) failures.push(`${label}: warm median latency regressed by more than 50% and 0.5 ms`)
@@ -58,9 +67,14 @@ async function main() {
     '', '| Filter / mode / efSearch | Warm p50 ms before/after | Burst p95 ms before/after | Recall before/after | Peak reserved / limit bytes | Memory fallbacks |', '|---|---:|---:|---:|---:|---:|']
   for (let i = 0; i < Math.min(before.cases.length, after.cases.length); i++) {
     const a = before.cases[i], b = after.cases[i]
+    if (a.incorrect || b.incorrect) {
+      lines.push(`| ${b.filter} / ${b.mode ?? "ann"} / ${b.efSearch} | ${a.incorrect ? 'baseline incorrect' : a.p50Ms.toFixed(3)} / ${b.incorrect ? 'incorrect' : b.p50Ms.toFixed(3)} | | | | |`)
+      continue
+    }
     lines.push(`| ${b.filter} / ${b.mode ?? "ann"} / ${b.efSearch} | ${a.p50Ms.toFixed(3)} / ${b.p50Ms.toFixed(3)} | ${a.burst?.p95Ms.toFixed(3) ?? 'unavailable'} / ${b.burst?.p95Ms.toFixed(3) ?? 'unavailable'} | ${(a.recallAtK * 100).toFixed(1)}% / ${(b.recallAtK * 100).toFixed(1)}% | ${b.cacheStats ? `${b.cacheStats.peakBytes} / ${b.cacheStats.memoryBudgetBytes}` : 'unavailable'} | ${(b.memoryFallbacks ?? 0) + (b.burst?.memoryFallbacks ?? 0)} |`)
   }
   lines.push('', `Origin memory bytes before/after: ${before.originMemoryAfterBytes ?? 'unavailable'} / ${after.originMemoryAfterBytes ?? 'unavailable'}`,
+    ...incorrectBaseline(before).map(message => `NOTE: baseline returned wrong results, not compared — ${message}`),
     ...failures.map(message => `FAIL: ${message}`))
   const summary = lines.join('\n') + '\n'
   console.log(summary)

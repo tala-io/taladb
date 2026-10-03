@@ -10,10 +10,14 @@
  *   node scripts/bench-web.mjs [--json]
  *   node scripts/bench-web.mjs --vectors --cache-bytes 1048576 --json
  *   node scripts/bench-web.mjs --vectors --serve --port 3000 --json
+ *   node scripts/bench-web.mjs --vectors --repo ../baseline --baseline --json
  *
  * The page drives the @taladb/web worker (WASM + OPFS) over its message
  * protocol — the same path the `taladb` wrapper uses, so timings include the
  * full JS ↔ worker ↔ WASM round-trip.
+ *
+ * `--baseline` marks a reference checkout: cases whose results are wrong
+ * (an engine predating a fix the harness checks) are recorded, not fatal.
  */
 import { createServer } from 'node:http'
 import { existsSync } from 'node:fs'
@@ -68,6 +72,7 @@ async function main() {
       if (value !== null) query.set(name, value)
     }
     if (args.includes('--pressure')) query.set('pressure', '1')
+    if (args.includes('--baseline')) query.set('baseline', '1')
     settings(query.toString())
   }
   const requestedPort = Number(option('--port', '0'))
@@ -139,7 +144,10 @@ async function main() {
       console.log(`${report.config.count} vectors × ${report.config.dimensions} dimensions · ${report.config.cacheBytes ?? 'adaptive'} cache bytes · ${report.capabilities.storage}`)
       console.log('| Filter / mode | efSearch | First query ms | Warm p50/p95 ms | Recall@k |')
       console.log('|---|---:|---:|---:|---:|')
-      for (const row of report.cases) console.log(`| ${row.filter} / ${row.mode} | ${row.efSearch} | ${row.firstQueryMs.toFixed(3)} | ${row.p50Ms.toFixed(3)}/${row.p95Ms.toFixed(3)} | ${(row.recallAtK * 100).toFixed(1)}% |`)
+      for (const row of report.cases) {
+        if (row.incorrect) console.log(`| ${row.filter} / ${row.mode} | ${row.efSearch} | incorrect: ${row.incorrect} | | |`)
+        else console.log(`| ${row.filter} / ${row.mode} | ${row.efSearch} | ${row.firstQueryMs.toFixed(3)} | ${row.p50Ms.toFixed(3)}/${row.p95Ms.toFixed(3)} | ${(row.recallAtK * 100).toFixed(1)}% |`)
+      }
     } else {
       console.log(`OPFS ${opfs ? 'active' : 'UNAVAILABLE (in-memory fallback!)'}`)
       for (const r of rows) {

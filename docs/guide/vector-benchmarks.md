@@ -145,6 +145,10 @@ first-query latency, warm percentiles, recall and optional memory
 measurements. Regression gates check build time, warm median latency and
 recall. First-query latency and memory are reported without hard gates because
 browser startup, garbage collection and API availability vary across runners.
+The baseline runs the candidate's harness with `--baseline`: a filter whose
+results it gets wrong — an engine predating a fix the harness now checks — is
+listed in the summary and skipped instead of failing the job. Candidate results
+are always held to every correctness check.
 
 Synthetic vectors help isolate implementation changes. Validate index tuning
 and recall with representative embeddings, filters and dimensions from your

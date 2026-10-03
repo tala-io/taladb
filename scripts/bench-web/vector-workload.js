@@ -62,9 +62,14 @@ export async function originMemory() {
 // Production worker + persistent storage. Timings include postMessage, JSON,
 // WASM traversal, exact rescoring and returned documents. Synthetic clustered
 // vectors exercise retrieval structure; they are not an embedding-quality test.
+// A wrong result rather than a slow or failed one. Candidates always reject
+// it; a baseline run records the affected cases so CI can still compare.
+export class IncorrectResult extends Error {}
+
 export async function runVectorBenchmark(config, {
   Client = WorkerClient, now = () => performance.now(), progress = () => {},
   memory = originMemory, workerUrl = '/packages/bindings/web/worker/taladb.worker.js',
+  baseline = false,
 } = {}) {
   const { documents, probes } = dataset(config)
   const dbName = `vector-bench-${Date.now()}-${Math.random().toString(36).slice(2)}.db`
@@ -113,6 +118,7 @@ export async function runVectorBenchmark(config, {
     })
     return doc[field] === value
   })
+  const sweeps = [['exact', 100], ['ann', 64], ['ann', 100], ['ann', 200]]
   const cases = []
   try {
     await open()
@@ -143,88 +149,98 @@ export async function runVectorBenchmark(config, {
     // fingerprints use stable ordinals and exactly rescored f32 score bits.
     const bits = new DataView(new ArrayBuffer(4))
     for (const filter of filters) {
-      progress(`ground truth: ${filter.name}`)
-      const truth = []
-      const validate = hits => {
-        const counts = new Map(), ordinals = new Set()
-        for (const hit of hits) {
-          const doc = hit.document
-          if (!matches(doc, filter.value) || ordinals.has(doc.ordinal)) throw new Error(`filter eligibility or duplicate result: ${filter.name}`)
-          ordinals.add(doc.ordinal)
-          if (filter.options?.groupBy) {
-            const key = doc[filter.options.groupBy], count = (counts.get(key) ?? 0) + 1
-            counts.set(key, count)
-            if (count > filter.options.groupSize) throw new Error(`group quota mismatch: ${filter.name}`)
+      const first = cases.length
+      try {
+        progress(`ground truth: ${filter.name}`)
+        const truth = []
+        const validate = hits => {
+          const counts = new Map(), ordinals = new Set()
+          for (const hit of hits) {
+            const doc = hit.document
+            if (!matches(doc, filter.value) || ordinals.has(doc.ordinal)) throw new IncorrectResult(`filter eligibility or duplicate result: ${filter.name}`)
+            ordinals.add(doc.ordinal)
+            if (filter.options?.groupBy) {
+              const key = doc[filter.options.groupBy], count = (counts.get(key) ?? 0) + 1
+              counts.set(key, count)
+              if (count > filter.options.groupSize) throw new IncorrectResult(`group quota mismatch: ${filter.name}`)
+            }
           }
         }
-      }
-      const eligible = documents.filter(doc => matches(doc, filter.value))
-      const groups = new Map()
-      for (const doc of eligible) {
-        const key = doc[filter.options?.groupBy]
-        groups.set(key, (groups.get(key) ?? 0) + 1)
-      }
-      const available = filter.options?.groupBy
-        ? [...groups.values()].reduce((sum, count) => sum + Math.min(count, filter.options.groupSize), 0)
-        : eligible.length
-      const expectedCount = Math.min(config.topK, Math.max(0, available - (filter.options?.offset ?? 0)))
-      for (const query of probes) {
-        const hits = (await search(query, filter, 'exact', 100)).hits
-        validate(hits)
-        if (hits.length !== expectedCount) {
-          throw new Error(`exact filter eligibility mismatch: ${filter.name}`)
+        const eligible = documents.filter(doc => matches(doc, filter.value))
+        const groups = new Map()
+        for (const doc of eligible) {
+          const key = doc[filter.options?.groupBy]
+          groups.set(key, (groups.get(key) ?? 0) + 1)
         }
-        truth.push(hits)
-      }
-      for (const [mode, efSearch] of [['exact', 100], ['ann', 64], ['ann', 100], ['ann', 200]]) {
-        await close()
-        const reopenStart = now()
-        await open()
-        const reopenMs = now() - reopenStart
-        const firstStart = now()
-        const first = await search(probes[0], filter, mode, efSearch)
-        const firstQueryMs = now() - firstStart
-        if (mode === 'ann' && first.execution.path !== 'hnsw' && first.execution.reason !== 'memoryBudget') throw new Error('ANN was not used')
-        // Warm the fixed query sweep before measuring it.
-        for (const query of probes) await search(query, filter, mode, efSearch)
-        const times = []
-        let recall = 0, distances = 0, fingerprint = 2166136261, memoryFallbacks = 0
-        for (let i = 0; i < probes.length; i++) {
-          const start = now()
-          const result = await search(probes[i], filter, mode, efSearch)
-          times.push(now() - start)
-          validate(result.hits)
-          if (result.execution.reason === 'memoryBudget') memoryFallbacks++
-          else if (mode === 'ann' && result.execution.path !== 'hnsw') throw new Error('ANN was not used')
-          distances += result.execution.distanceComputations
-          const ids = new Set(truth[i].map(hit => hit.document.ordinal))
-          recall += ids.size ? result.hits.filter(hit => ids.has(hit.document.ordinal)).length / ids.size : 1
-          for (const hit of result.hits) {
-            bits.setFloat32(0, hit.score)
-            fingerprint = Math.imul(fingerprint ^ hit.document.ordinal ^ bits.getUint32(0), 16777619) >>> 0
+        const available = filter.options?.groupBy
+          ? [...groups.values()].reduce((sum, count) => sum + Math.min(count, filter.options.groupSize), 0)
+          : eligible.length
+        const expectedCount = Math.min(config.topK, Math.max(0, available - (filter.options?.offset ?? 0)))
+        for (const query of probes) {
+          const hits = (await search(query, filter, 'exact', 100)).hits
+          validate(hits)
+          if (hits.length !== expectedCount) {
+            throw new IncorrectResult(`exact filter eligibility mismatch: ${filter.name}`)
           }
+          truth.push(hits)
         }
-        // Model concurrent requests from a browser UI. The production worker
-        // serializes core operations; these measure queueing, not Rust threads.
-        const burstTimes = []
-        let burstFallbacks = 0
-        for (let i = 0; i < probes.length; i++) {
-          await Promise.all(Array.from({ length: config.concurrency }, async (_, j) => {
+        for (const [mode, efSearch] of sweeps) {
+          await close()
+          const reopenStart = now()
+          await open()
+          const reopenMs = now() - reopenStart
+          const firstStart = now()
+          const first = await search(probes[0], filter, mode, efSearch)
+          const firstQueryMs = now() - firstStart
+          if (mode === 'ann' && first.execution.path !== 'hnsw' && first.execution.reason !== 'memoryBudget') throw new Error('ANN was not used')
+          // Warm the fixed query sweep before measuring it.
+          for (const query of probes) await search(query, filter, mode, efSearch)
+          const times = []
+          let recall = 0, distances = 0, fingerprint = 2166136261, memoryFallbacks = 0
+          for (let i = 0; i < probes.length; i++) {
             const start = now()
-            const result = await search(probes[(i + j) % probes.length], filter, mode, efSearch)
-            burstTimes.push(now() - start)
-            if (result.execution.reason === 'memoryBudget') burstFallbacks++
+            const result = await search(probes[i], filter, mode, efSearch)
+            times.push(now() - start)
+            validate(result.hits)
+            if (result.execution.reason === 'memoryBudget') memoryFallbacks++
             else if (mode === 'ann' && result.execution.path !== 'hnsw') throw new Error('ANN was not used')
-          }))
+            distances += result.execution.distanceComputations
+            const ids = new Set(truth[i].map(hit => hit.document.ordinal))
+            recall += ids.size ? result.hits.filter(hit => ids.has(hit.document.ordinal)).length / ids.size : 1
+            for (const hit of result.hits) {
+              bits.setFloat32(0, hit.score)
+              fingerprint = Math.imul(fingerprint ^ hit.document.ordinal ^ bits.getUint32(0), 16777619) >>> 0
+            }
+          }
+          // Model concurrent requests from a browser UI. The production worker
+          // serializes core operations; these measure queueing, not Rust threads.
+          const burstTimes = []
+          let burstFallbacks = 0
+          for (let i = 0; i < probes.length; i++) {
+            await Promise.all(Array.from({ length: config.concurrency }, async (_, j) => {
+              const start = now()
+              const result = await search(probes[(i + j) % probes.length], filter, mode, efSearch)
+              burstTimes.push(now() - start)
+              if (result.execution.reason === 'memoryBudget') burstFallbacks++
+              else if (mode === 'ann' && result.execution.path !== 'hnsw') throw new Error('ANN was not used')
+            }))
+          }
+          const stats = await cacheStats()
+          if (stats && (stats.activeBytes !== 0 || stats.retainedBytes > stats.budgetBytes || stats.peakBytes > stats.memoryBudgetBytes)) {
+            throw new Error('shared search memory accounting exceeded budget or leaked a reservation')
+          }
+          cases.push({ filter: filter.name, mode, efSearch, reopenMs, firstQueryMs, ...percentiles(times), recallAtK: recall / probes.length, distances, fingerprint,
+            firstMemoryFallback: first.execution.reason === 'memoryBudget', memoryFallbacks, cacheStats: stats,
+            burst: { concurrency: config.concurrency, requests: burstTimes.length, ...percentiles(burstTimes), memoryFallbacks: burstFallbacks } })
+          progress(`${filter.name} ${mode} ef=${efSearch}: ${cases.at(-1).p50Ms.toFixed(2)} ms`)
         }
-        const stats = await cacheStats()
-        if (stats && (stats.activeBytes !== 0 || stats.retainedBytes > stats.budgetBytes || stats.peakBytes > stats.memoryBudgetBytes)) {
-          throw new Error('shared search memory accounting exceeded budget or leaked a reservation')
-        }
-        cases.push({ filter: filter.name, mode, efSearch, reopenMs, firstQueryMs, ...percentiles(times), recallAtK: recall / probes.length, distances, fingerprint,
-          firstMemoryFallback: first.execution.reason === 'memoryBudget', memoryFallbacks, cacheStats: stats,
-          burst: { concurrency: config.concurrency, requests: burstTimes.length, ...percentiles(burstTimes), memoryFallbacks: burstFallbacks } })
-        progress(`${filter.name} ${mode} ef=${efSearch}: ${cases.at(-1).p50Ms.toFixed(2)} ms`)
+      } catch (error) {
+        if (!baseline || !(error instanceof IncorrectResult)) throw error
+        // A baseline can predate a correctness fix this harness checks for.
+        // Keep the case slots aligned with the candidate, without timings.
+        cases.splice(first)
+        for (const [mode, efSearch] of sweeps) cases.push({ filter: filter.name, mode, efSearch, incorrect: error.message })
+        progress(`${filter.name}: baseline incorrect (${error.message})`)
       }
     }
     const pressureCycle = []

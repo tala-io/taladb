@@ -199,7 +199,7 @@ jobs:
             before=""
             after=""
             for run in $(seq 1 "$repeats"); do
-              node scripts/bench-web.mjs --vectors --repo "$RUNNER_TEMP/vector-web-baseline" \
+              node scripts/bench-web.mjs --vectors --repo "$RUNNER_TEMP/vector-web-baseline" --baseline \
                 --count "$count" --queries 30 --cache-bytes "$budget" --json --output "vector-web-before-$budget-$run.json"
               node scripts/bench-web.mjs --vectors --count "$count" --queries 30 \
                 --cache-bytes "$budget" --json --output "vector-web-after-$budget-$run.json"

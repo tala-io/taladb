@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { settings, dataset, percentiles, runVectorBenchmark } from './vector-workload.js'
-import { aggregate, compare } from '../vector-web-bench-compare.mjs'
+import { settings, dataset, percentiles, runVectorBenchmark, IncorrectResult } from './vector-workload.js'
+import { aggregate, compare, incorrectBaseline } from '../vector-web-bench-compare.mjs'
 
 test('settings validate device budgets and dataset probes are stable across collection sizes', () => {
   const config = settings('count=100&dims=8&queries=3&cache-bytes=1048576')
@@ -14,7 +14,7 @@ test('settings validate device budgets and dataset probes are stable across coll
   assert.deepEqual(percentiles([4, 1, 3, 2]), { p50Ms: 3, p95Ms: 4 })
 })
 
-function fake(storage = 'opfs', fail = false, { fallback = false, noStats = false, leak = false } = {}) {
+function fake(storage = 'opfs', fail = false, { fallback = false, noStats = false, leak = false, scalarArrays = false } = {}) {
   const calls = [], documents = []
   let opens = 0, closes = 0, terminated = 0
   class Client {
@@ -49,10 +49,13 @@ function fake(storage = 'opfs', fail = false, { fallback = false, noStats = fals
       if (fail) throw new Error('search failed')
       const matches = (doc, filter) => Object.entries(filter ?? {}).every(([field, value]) => {
         if (field === '$and') return value.every(child => matches(doc, child))
-        if (value && typeof value === 'object') return Object.entries(value).every(([op, bound]) => {
+        if (value && typeof value === 'object') {
           const values = Array.isArray(doc[field]) ? doc[field] : [doc[field]]
-          return values.some(v => op === '$gte' ? v >= bound : v < bound)
-        })
+          const test = ([op, bound]) => v => op === '$gte' ? v >= bound : v < bound
+          // Engines before array-aware narrowing required one element to satisfy every bound.
+          if (scalarArrays) return values.some(v => Object.entries(value).every(entry => test(entry)(v)))
+          return Object.entries(value).every(entry => values.some(test(entry)))
+        }
         return doc[field] === value
       })
       let matching = documents.filter(doc => matches(doc, request.filter))
@@ -157,4 +160,23 @@ test('browser rejects leaked search reservations and releases its worker', async
   const f = fake('opfs', false, { leak: true })
   await assert.rejects(runVectorBenchmark(settings('count=100&dims=8&queries=1'), { Client: f.Client, memory: async () => null }), /exceeded budget or leaked/)
   assert.equal(f.stats().opens, f.stats().terminated)
+})
+
+test('baselines that predate a correctness fix are recorded and skipped, candidates are rejected', async () => {
+  const config = settings('count=100&dims=8&queries=2')
+  await assert.rejects(runVectorBenchmark(config, { Client: fake('opfs', false, { scalarArrays: true }).Client, memory: async () => null }), IncorrectResult)
+  const f = fake('opfs', false, { scalarArrays: true })
+  const before = await runVectorBenchmark(config, { Client: f.Client, memory: async () => null, baseline: true })
+  assert.equal(f.stats().opens, f.stats().terminated)
+  const wrong = before.cases.filter(row => row.incorrect)
+  assert.deepEqual(wrong.map(row => [row.filter, row.mode, row.efSearch]),
+    [['array-cross-1pct', 'exact', 100], ['array-cross-1pct', 'ann', 64], ['array-cross-1pct', 'ann', 100], ['array-cross-1pct', 'ann', 200]])
+  assert.match(wrong[0].incorrect, /exact filter eligibility mismatch/)
+  assert.equal(before.cases.length, 36)
+  const after = await runVectorBenchmark(config, { Client: fake().Client, memory: async () => null })
+  for (const report of [before, after]) report.ua = 'test browser'
+  const a = aggregate([before, before]), b = aggregate([after, after])
+  assert.deepEqual(compare(a, b), [])
+  assert.deepEqual(incorrectBaseline(a), ['array-cross-1pct: exact filter eligibility mismatch: array-cross-1pct'])
+  assert.ok(compare(b, a).some(message => message.includes('array-cross-1pct exact ef=100')))
 })
