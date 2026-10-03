@@ -16,9 +16,9 @@ use crate::fts::{
     fts_stats_table_name, fts_table_name, token_frequencies, tokenize,
 };
 use crate::index::{
-    CompoundIndexDef, IndexDef, META_COMPOUND_TABLE, META_INDEXES_TABLE, compound_meta_key,
-    compound_table_name, docs_table_name, encode_compound_keys, encode_index_keys,
-    index_table_name, meta_key,
+    CompoundIndexDef, IndexDef, META_COMPOUND_TABLE, META_INDEX_ARRAYS_TABLE, META_INDEXES_TABLE,
+    adjust_index_arrays, compound_meta_key, compound_table_name, docs_table_name,
+    encode_compound_keys, encode_index_keys, index_table_name, meta_key,
 };
 use crate::query::executor::{execute, fetch_documents, index_ordered_entries};
 use crate::query::filter::Filter;
@@ -521,9 +521,11 @@ impl Collection {
         )?;
         let idx_table = index_table_name(&self.name, field);
         let mut keys: Vec<Vec<u8>> = Vec::with_capacity(existing.len());
+        let mut arrays = 0u64;
         for (_, doc_bytes) in existing {
             let doc: Document = postcard::from_bytes(&doc_bytes)?;
             if let Some(val) = doc.get(field) {
+                arrays += u64::from(matches!(val, Value::Array(_)));
                 keys.extend(encode_index_keys(val, doc.id));
             }
         }
@@ -532,6 +534,11 @@ impl Collection {
             .map(|k| crate::engine::KvOp::Put(k.as_slice(), &[]))
             .collect();
         wtxn.apply_batch(&idx_table, &ops)?;
+        wtxn.put(
+            META_INDEX_ARRAYS_TABLE,
+            meta_key.as_bytes(),
+            &arrays.to_le_bytes(),
+        )?;
 
         bump_revision(wtxn.as_mut(), &format!("schema::{}", self.name))?;
         wtxn.commit()?;
@@ -562,6 +569,7 @@ impl Collection {
 
         // Remove metadata
         wtxn.delete(META_INDEXES_TABLE, meta_key.as_bytes())?;
+        wtxn.delete(META_INDEX_ARRAYS_TABLE, meta_key.as_bytes())?;
         bump_revision(wtxn.as_mut(), &format!("schema::{}", self.name))?;
         wtxn.commit()?;
         self.invalidate_index_cache();
@@ -1668,6 +1676,8 @@ impl Collection {
 
         // --- secondary indexes ---
         for (idx, table) in cache.indexes.iter().zip(&tables.btree) {
+            let mut removed = 0u64;
+            let mut added = 0u64;
             let mut keys: Vec<(Vec<u8>, bool)> = Vec::new(); // (key, is_delete)
             for (doc, old_doc) in docs {
                 if unchanged(doc, old_doc.as_ref(), &idx.field) {
@@ -1676,6 +1686,7 @@ impl Collection {
                 if let Some(old) = old_doc
                     && let Some(old_val) = old.get(&idx.field)
                 {
+                    removed += u64::from(matches!(old_val, Value::Array(_)));
                     keys.extend(
                         encode_index_keys(old_val, old.id)
                             .into_iter()
@@ -1683,6 +1694,7 @@ impl Collection {
                     );
                 }
                 if let Some(new_val) = doc.get(&idx.field) {
+                    added += u64::from(matches!(new_val, Value::Array(_)));
                     keys.extend(
                         encode_index_keys(new_val, doc.id)
                             .into_iter()
@@ -1690,6 +1702,8 @@ impl Collection {
                     );
                 }
             }
+            // Count empty/unindexable arrays even when no key was produced.
+            adjust_index_arrays(wtxn, &self.name, &idx.field, removed, added)?;
             if keys.is_empty() {
                 continue;
             }
@@ -2570,6 +2584,11 @@ impl Collection {
         wtxn.apply_batch(&tables.docs, &body_ops)?;
 
         for (idx, table) in cache.indexes.iter().zip(&tables.btree) {
+            let removed = docs
+                .iter()
+                .filter(|d| matches!(d.get(&idx.field), Some(Value::Array(_))))
+                .count() as u64;
+            adjust_index_arrays(wtxn, &self.name, &idx.field, removed, 0)?;
             let keys: Vec<Vec<u8>> = docs
                 .iter()
                 .filter_map(|doc| {

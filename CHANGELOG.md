@@ -3,6 +3,8 @@
 
 ## 0.12.0 — Unreleased
 
+- Added cost-aware vector filter intersections: bounded index previews choose small candidate sets, broad equality and `$in` branches use batched point probes when cheaper, and scalar comparisons share narrower scans. Optional array counts are maintained with index writes and rebuilds; array-valued and legacy indexes retain independent comparison semantics. The browser/OPFS benchmark now covers skewed AND filters, narrow scalar windows and array bounds satisfied by different elements.
+
 - TalaDB for Rust: the engine is now the `taladb` crate, published to crates.io and usable as the local database of any Rust application.
 
 - Fixed retained HNSW nodes surviving graph replacement.

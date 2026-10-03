@@ -297,6 +297,45 @@ pub fn docs_table_name(collection: &str) -> String {
 pub(crate) const REMOVED_TABLE_PREFIXES: [&str; 2] = ["tomb::", "quarantine::"];
 
 pub const META_INDEXES_TABLE: &str = "meta::indexes";
+
+// Optional, transactionally maintained array-document counts. Missing or
+// malformed records mean unknown, never scalar-only. Existing index definitions
+// and keys keep their encoding; rebuilding an old index enables this fast path.
+pub(crate) const META_INDEX_ARRAYS_TABLE: &str = "meta::index_arrays";
+
+pub(crate) fn index_array_count(bytes: &[u8]) -> Option<u64> {
+    Some(u64::from_le_bytes(bytes.try_into().ok()?))
+}
+
+pub(crate) fn adjust_index_arrays(
+    txn: &mut dyn crate::engine::WriteTxn,
+    collection: &str,
+    field: &str,
+    removed: u64,
+    added: u64,
+) -> Result<(), crate::error::TalaDbError> {
+    if removed == added {
+        return Ok(());
+    }
+    let key = meta_key(collection, field);
+    let Some(bytes) = txn.get(META_INDEX_ARRAYS_TABLE, key.as_bytes())? else {
+        return Ok(()); // legacy index: do not invent a partial count
+    };
+    let count = index_array_count(&bytes)
+        .and_then(|n| n.checked_sub(removed))
+        .and_then(|n| n.checked_add(added));
+    if let Some(count) = count {
+        txn.put(
+            META_INDEX_ARRAYS_TABLE,
+            key.as_bytes(),
+            &count.to_le_bytes(),
+        )?;
+    } else {
+        // Unknown metadata disables narrowing without preventing the write.
+        txn.delete(META_INDEX_ARRAYS_TABLE, key.as_bytes())?;
+    }
+    Ok(())
+}
 pub const META_COMPOUND_TABLE: &str = "meta::compound_indexes";
 pub const META_VERSION_TABLE: &str = "meta::db_version";
 pub const META_VERSION_KEY: &[u8] = b"version";

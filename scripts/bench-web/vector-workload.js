@@ -32,7 +32,7 @@ export function dataset(config) {
   }
   const centers = Array.from({ length: 32 }, () => normalize(Array.from({ length: config.dimensions }, () => random() * 2 - 1)))
   const point = i => normalize(centers[i % centers.length].map(x => x + (random() * 2 - 1) * 0.2))
-  const documents = Array.from({ length: config.count }, (_, i) => ({ ordinal: i, tenant: i % 10, bucket: i % 100, v: point(i) }))
+  const documents = Array.from({ length: config.count }, (_, i) => ({ ordinal: i, tenant: i % 10, bucket: i % 100, tags: [i, i + config.count], v: point(i) }))
   seed = config.seed ^ 0x12345
   return {
     documents,
@@ -85,7 +85,25 @@ export async function runVectorBenchmark(config, {
     }
   }
   const search = (query, filter, mode, efSearch) => command({ op: 'search', field: 'v', query, topK: config.topK, filter, options: { mode, efSearch } })
-  const filters = [{ name: 'all', value: null }, { name: 'tenant-10pct', value: { tenant: 0 } }, { name: 'bucket-1pct', value: { bucket: 0 } }]
+  const windowStart = Math.floor(config.count / 2)
+  const filters = [
+    { name: 'all', value: null },
+    { name: 'tenant-10pct', value: { tenant: 0 } },
+    { name: 'bucket-1pct', value: { bucket: 0 } },
+    { name: 'and-skew-1pct', value: { $and: [{ tenant: 0 }, { bucket: 0 }] } },
+    { name: 'scalar-window-1pct', value: { ordinal: { $gte: windowStart, $lt: windowStart + Math.max(1, Math.floor(config.count / 100)) } } },
+    // Every tags array has one element on either side. Merging these bounds
+    // into a scalar range would silently exclude every eligible document.
+    { name: 'array-cross-1pct', value: { $and: [{ tags: { $gte: config.count, $lt: config.count } }, { bucket: 0 }] } },
+  ]
+  const matches = (doc, filter) => Object.entries(filter ?? {}).every(([field, value]) => {
+    if (field === '$and') return value.every(child => matches(doc, child))
+    if (value && typeof value === 'object') return Object.entries(value).every(([op, bound]) => {
+      const values = Array.isArray(doc[field]) ? doc[field] : [doc[field]]
+      return values.some(v => op === '$gte' ? v >= bound : v < bound)
+    })
+    return doc[field] === value
+  })
   const cases = []
   try {
     await open()
@@ -97,7 +115,7 @@ export async function runVectorBenchmark(config, {
     for (let i = 0; i < documents.length; i += 128) {
       await client.call('insertMany', { collection: 'vectors', docsJson: JSON.stringify(documents.slice(i, i + 128)) })
     }
-    for (const field of ['tenant', 'bucket']) await client.call('createIndex', { collection: 'vectors', field })
+    for (const field of ['tenant', 'bucket', 'ordinal', 'tags']) await client.call('createIndex', { collection: 'vectors', field })
     const insertMs = now() - insertStart
     const buildStart = now()
     await command({ op: 'create', field: 'v', dimensions: config.dimensions, options: { m: config.m, efConstruction: config.efConstruction, quantization: config.quantization }, deferBuild: true })
@@ -118,7 +136,14 @@ export async function runVectorBenchmark(config, {
     for (const filter of filters) {
       progress(`ground truth: ${filter.name}`)
       const truth = []
-      for (const query of probes) truth.push((await search(query, filter.value, 'exact', 100)).hits)
+      const expectedCount = Math.min(config.topK, documents.filter(doc => matches(doc, filter.value)).length)
+      for (const query of probes) {
+        const hits = (await search(query, filter.value, 'exact', 100)).hits
+        if (hits.length !== expectedCount || hits.some(hit => !matches(hit.document, filter.value))) {
+          throw new Error(`exact filter eligibility mismatch: ${filter.name}`)
+        }
+        truth.push(hits)
+      }
       for (const efSearch of [64, 100, 200]) {
         await close()
         const reopenStart = now()
@@ -136,6 +161,7 @@ export async function runVectorBenchmark(config, {
           const start = now()
           const result = await search(probes[i], filter.value, 'ann', efSearch)
           times.push(now() - start)
+          if (result.hits.some(hit => !matches(hit.document, filter.value))) throw new Error(`ANN filter eligibility mismatch: ${filter.name}`)
           if (result.execution.reason === 'memoryBudget') memoryFallbacks++
           else if (result.execution.path !== 'hnsw') throw new Error('ANN was not used')
           distances += result.execution.distanceComputations

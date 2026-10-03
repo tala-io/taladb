@@ -45,9 +45,6 @@ JavaScript runtime.
 - **Better approximate-search recall at scale** — improve candidate selection
   and graph connectivity, validated against exact search on larger collections
   and representative embedding datasets.
-- **Cost-aware filter planning** — use selectivity estimates and metadata about
-  array-valued fields to choose cheaper index intersections and narrower scalar
-  range scans while preserving array matching semantics.
 - **Streaming filtered and grouped search** — reduce memory used by large
   filter ID sets and grouped result pools, beyond the shared decoded-cache and
   ANN traversal allowance.

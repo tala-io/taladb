@@ -38,7 +38,15 @@ function fake(storage = 'opfs', fail = false, { fallback = false, noStats = fals
         return { processed: this.processed, total: documents.length, state: this.processed === documents.length ? 'ready' : 'building' }
       }
       if (fail) throw new Error('search failed')
-      const matching = documents.filter(doc => Object.entries(request.filter ?? {}).every(([field, value]) => doc[field] === value))
+      const matches = (doc, filter) => Object.entries(filter ?? {}).every(([field, value]) => {
+        if (field === '$and') return value.every(child => matches(doc, child))
+        if (value && typeof value === 'object') return Object.entries(value).every(([op, bound]) => {
+          const values = Array.isArray(doc[field]) ? doc[field] : [doc[field]]
+          return values.some(v => op === '$gte' ? v >= bound : v < bound)
+        })
+        return doc[field] === value
+      })
+      const matching = documents.filter(doc => matches(doc, request.filter))
       return { hits: matching.slice(0, request.topK).map(document => ({ document, score: 1 / (document.ordinal + 1) })),
         execution: { path: request.options.mode === 'ann' && !fallback ? 'hnsw' : 'exact', reason: request.options.mode === 'ann' && fallback ? 'memoryBudget' : 'indexReady', distanceComputations: matching.length } }
     }
@@ -51,12 +59,15 @@ test('worker workload uses configured cache, staged builds, persisted reopen and
   let time = 0
   const config = settings('count=100&dims=8&queries=3')
   const result = await runVectorBenchmark(config, { Client: f.Client, now: () => time++, memory: async () => 123 })
-  assert.equal(result.cases.length, 9)
+  assert.equal(result.cases.length, 18)
   assert.ok(result.cases.every(row => row.recallAtK === 1 && row.firstQueryMs > 0))
   assert.equal(result.buildStep.count, 4)
   assert.ok(result.cases.every(row => row.burst.requests === config.queries * config.concurrency && row.cacheStats.activeBytes === 0))
   assert.equal(result.originMemoryAfterBytes, 123)
-  assert.deepEqual(f.stats(), { opens: 10, closes: 10, terminated: 10 })
+  assert.deepEqual(f.stats(), { opens: 19, closes: 19, terminated: 19 })
+  for (const name of ['and-skew-1pct', 'scalar-window-1pct', 'array-cross-1pct']) {
+    assert.equal(result.cases.filter(row => row.filter === name).length, 3)
+  }
   assert.ok(f.calls.filter(c => c.op === 'init').every(c => JSON.parse(c.args.configJson).vector_cache_bytes === config.cacheBytes))
   const builds = f.calls.filter(c => c.op === 'vectorCommand').map(c => JSON.parse(c.args.requestJson)).filter(c => c.op === 'stepBuild')
   assert.ok(builds.every(c => c.batchSize === 32))

@@ -29,8 +29,9 @@ node scripts/bench-web.mjs --vectors --count 5000 --dims 384 \
 ```
 
 Results include build time and batch-step p50/p95 for 32-vector steps. For
-unfiltered queries, a 10% tenant filter and a 1% bucket filter, each at
-`efSearch` 64, 100 and 200, the suite records:
+unfiltered queries, a 10% tenant filter, a 1% bucket filter, a skewed AND
+intersection, a 1% scalar window, and an array comparison combined with the
+bucket filter, each at `efSearch` 64, 100 and 200, the suite records:
 
 - Worker/database reopen time and the first ANN query after reopening.
 - Warm query p50/p95, distance computations, and recall against exact results
@@ -46,6 +47,13 @@ unfiltered queries, a 10% tenant filter and a 1% bucket filter, each at
   `measureUserAgentSpecificMemory`. Unsupported or timed-out measurements are
   `null`. These measurements include JavaScript and workers; they are not the
   graph cache size or a process peak-memory measurement.
+
+The AND case combines the 10% tenant branch with the 1% bucket branch. The
+scalar window constrains indexed ordinals from both sides. The array case
+requires separate elements to satisfy contradictory scalar bounds; it catches
+incorrect range narrowing while measuring a multi-index filter. Exact ground
+truth uses the same filter, and result fingerprints can be compared across
+checkouts.
 
 The first query starts with a fresh worker and decoded-node cache. OS and
 storage caches can remain warm. OPFS is required: an IndexedDB fallback fails

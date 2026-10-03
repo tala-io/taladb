@@ -141,6 +141,10 @@ console.log(result.hits)      // { document, score }[]
 
 Indexed scalar equalities, ranges and `$in` predicates resolve matching IDs directly from index keys. This also applies to covered AND/OR branches and equalities on every field of a compound index. Array elements keep the same matching semantics as `find`. Predicates such as negation, existence and regex still require document fields; indexed conditions narrow those reads when possible.
 
+AND filters use bounded previews of up to 64 keys per indexed branch to choose a small candidate set. When cheaper than enumerating a broad equality or `$in` range, remaining candidates are checked with batched index point lookups. Broad branches retain only IDs in the current intersection. These previews are estimates; they do not guarantee the cheapest plan when every branch exceeds the preview limit.
+
+Multiple comparisons on a field share narrower scans only when transactional index metadata confirms that the field has no array-valued documents. Array fields keep independent comparisons because different elements can satisfy each bound. Indexes created or rebuilt with this release have that metadata. Older indexes without it stay conservative; dropping and recreating an index enables scalar narrowing. Residual predicates still require document fields.
+
 Exact filtered searches batch vector lookups for sparse matches. Dense matches use a streaming vector scan or an existing decoded-vector cache. Filtered searches do not populate that cache. Filter keys, vectors and returned documents all come from the same read snapshot.
 
 `efSearch` defaults to 100. The effective candidate count is at least `(offset + topK) * oversampling`; oversampling defaults to 4 and accepts 1–100. Grouped ANN expands the pool when necessary. Every returned ANN score is recomputed from the original f32 vector in the same read snapshot as the filter and document.
