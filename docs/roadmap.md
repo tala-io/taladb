@@ -74,7 +74,5 @@ JavaScript runtime.
 
 - **Swift and Kotlin packages** — *early release available:*
   [Android (Kotlin)](/guide/android) and [iOS & macOS (Swift)](/guide/swift).
-  Next: publish them to Maven Central and SwiftPM, then settle the API for a
-  stable release.
 - **WASI target** — run the same engine inside Wasmtime, WasmEdge and Fastly
   Compute.
