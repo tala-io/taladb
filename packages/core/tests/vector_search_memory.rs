@@ -133,7 +133,7 @@ fn signature(r: &taladb::VectorQueryResult) -> Vec<(ulid::Ulid, u32)> {
 }
 
 #[test]
-fn overlapping_ann_uses_exact_with_filters_pagination_and_threshold_on_the_same_snapshot() {
+fn overlapping_ann_shares_the_budget_and_falls_back_exactly_when_none_is_left() {
     for budget in [1024 * 1024, 8 * 1024 * 1024] {
         let (db, gate, entered, resume) = setup(128);
         db.set_vector_cache_budget(budget);
@@ -145,7 +145,7 @@ fn overlapping_ann_uses_exact_with_filters_pagination_and_threshold_on_the_same_
         });
         entered.recv_timeout(Duration::from_secs(10)).unwrap();
         let stats = db.vector_cache_stats();
-        assert_eq!(stats.active_bytes, budget);
+        assert_eq!(stats.active_bytes, budget / 4 * 3);
         assert!(stats.active_bytes + stats.retained_bytes <= stats.memory_budget_bytes);
         let col = db.collection("docs").unwrap();
         let filter = Some(Filter::Eq("group".into(), Value::Int(1)));
@@ -154,6 +154,14 @@ fn overlapping_ann_uses_exact_with_filters_pagination_and_threshold_on_the_same_
         options.score_threshold = Some(-0.5);
         options.group_by = Some("group".into());
         options.group_size = Some(10);
+        // The held walk leaves a quarter of the budget for overlapping walks.
+        let shared = col
+            .search_vectors("v", &QUERY, 3, filter.clone(), &options)
+            .unwrap();
+        assert_eq!(shared.execution.path, "hnsw");
+        assert_eq!(db.vector_cache_stats().active_bytes, budget / 4 * 3);
+        // With nothing left, the overlap scans the same snapshot exactly.
+        db.set_vector_cache_budget(0);
         let fallback = col
             .search_vectors("v", &QUERY, 3, filter.clone(), &options)
             .unwrap();
@@ -206,7 +214,7 @@ fn read_errors_and_budget_reduction_release_the_live_loan() {
     });
     entered.recv_timeout(Duration::from_secs(10)).unwrap();
     db.set_vector_cache_budget(0);
-    assert_eq!(db.vector_cache_stats().active_bytes, 1024 * 1024);
+    assert_eq!(db.vector_cache_stats().active_bytes, 768 * 1024);
     assert_eq!(
         db.collection("docs")
             .unwrap()

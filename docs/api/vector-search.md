@@ -215,7 +215,9 @@ observe budget changes; active loans finish under their original allowance.
 Reducing the budget prevents new admissions until those loans return.
 
 Retained caches, pinned exact-vector blocks, full-vector cache construction and
-concurrent graph loans share this allowance. ANN uses a compact visited bitset
+concurrent graph loans share this allowance. A walk reserves at most three
+quarters of what is free, so walks that start while it runs still get room; its
+node cache evicts within that share. ANN uses a compact visited bitset
 and checks buffer growth before allocating. If a walk cannot fit, even when
 `mode: 'ann'` was requested, search switches to exact on the same snapshot.
 `execution.path` is `'exact'` and `execution.reason` is `'memoryBudget'`. Filters,

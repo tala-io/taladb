@@ -138,7 +138,14 @@ impl SearchCache {
                 bytes: 0,
             };
         }
-        self.reserve(available)
+        // Node caches evict under their allowance, so a walk only needs room
+        // for its visited set and queue. Hold a quarter back for walks that
+        // start while this one runs; otherwise every overlapping query falls
+        // back to an exact scan however large the budget is.
+        let grant = available
+            .saturating_sub(available / 4)
+            .max(minimum.max(64 * 1024).min(available));
+        self.reserve(grant)
             .expect("available graph reservation fits")
     }
     pub fn stats(&self) -> VectorCacheStats {
@@ -382,12 +389,27 @@ mod tests {
         cache.set_budget(1024 * 1024);
         let loan = cache.reserve_graph(0);
         cache.set_budget(0);
-        assert_eq!(cache.stats().active_bytes, 1024 * 1024);
+        assert_eq!(cache.stats().active_bytes, 768 * 1024);
         assert_eq!(cache.reserve_graph(0).bytes, 0);
         assert!(cache.reserve(1).is_none());
         drop(loan);
         assert_eq!(cache.stats().active_bytes, 0);
         assert_eq!(cache.reserve_graph(0).bytes, 64 * 1024);
+    }
+    #[test]
+    fn overlapping_graph_walks_share_the_budget_instead_of_starving() {
+        let mut cache = SearchCache::default();
+        cache.set_budget(1024 * 1024);
+        let first = cache.reserve_graph(0);
+        let second = cache.reserve_graph(0);
+        let third = cache.reserve_graph(0);
+        assert_eq!(first.bytes, 768 * 1024);
+        assert_eq!(second.bytes, 192 * 1024);
+        assert_eq!(third.bytes, 64 * 1024); // the 64 KiB floor takes the remainder
+        assert!(cache.stats().active_bytes <= cache.memory_budget());
+        // A warm graph keeps its decoded nodes when they fit.
+        drop((first, second, third));
+        assert_eq!(cache.reserve_graph(900 * 1024).bytes, 900 * 1024);
     }
     #[test]
     fn reservation_cleanup_survives_unwind() {
