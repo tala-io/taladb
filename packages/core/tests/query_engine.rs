@@ -319,6 +319,7 @@ fn find_with_options_sort_skip_limit() {
         skip: 1,
         limit: Some(3),
         fields: None,
+        exclude: None,
         timeout: None,
     };
     let results = col.find_with_options(Filter::All, opts).unwrap();
@@ -350,6 +351,7 @@ fn find_with_options_projection() {
         skip: 0,
         limit: None,
         fields: Some(vec!["name".into(), "age".into()]),
+        exclude: None,
         timeout: None,
     };
     let results = col.find_with_options(Filter::All, opts).unwrap();
@@ -376,6 +378,7 @@ fn sort_descending() {
         skip: 0,
         limit: None,
         fields: None,
+        exclude: None,
         timeout: None,
     };
     let results = col.find_with_options(Filter::All, opts).unwrap();
@@ -407,6 +410,7 @@ fn multi_field_sort() {
         skip: 0,
         limit: None,
         fields: None,
+        exclude: None,
         timeout: None,
     };
     let results = col.find_with_options(Filter::All, opts).unwrap();
@@ -445,6 +449,7 @@ fn skip_beyond_collection_size_returns_empty() {
         skip: 100,
         limit: None,
         fields: None,
+        exclude: None,
         timeout: None,
     };
     assert!(col.find_with_options(Filter::All, opts).unwrap().is_empty());
@@ -462,6 +467,7 @@ fn limit_zero_returns_empty() {
         skip: 0,
         limit: Some(0),
         fields: None,
+        exclude: None,
         timeout: None,
     };
     assert!(col.find_with_options(Filter::All, opts).unwrap().is_empty());
@@ -491,6 +497,7 @@ fn pagination_with_filter() {
         skip: 3,
         limit: Some(4),
         fields: None,
+        exclude: None,
         timeout: None,
     };
     let results = col

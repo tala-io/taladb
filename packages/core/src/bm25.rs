@@ -27,11 +27,21 @@ pub struct Bm25Params {
     /// Length normalisation. `0.0` ignores document length entirely,
     /// `1.0` normalises fully by `|D| / avgdl`.
     pub b: f32,
+    /// Drop common English function words ("to", "the", "and", …) from the
+    /// *query* before ranking — see [`crate::fts::without_stopwords`]. On by
+    /// default: with OR semantics, "kind to a classmate" otherwise ranks every
+    /// document containing "to". The index is untouched either way, so turning
+    /// this off needs no reindex.
+    pub stopwords: bool,
 }
 
 impl Default for Bm25Params {
     fn default() -> Self {
-        Self { k1: 1.2, b: 0.75 }
+        Self {
+            k1: 1.2,
+            b: 0.75,
+            stopwords: true,
+        }
     }
 }
 
@@ -155,7 +165,11 @@ pub fn rrf_contribution(rank: usize, k: f32, weight: f32) -> f32 {
 mod tests {
     use super::*;
 
-    const P: Bm25Params = Bm25Params { k1: 1.2, b: 0.75 };
+    const P: Bm25Params = Bm25Params {
+        k1: 1.2,
+        b: 0.75,
+        stopwords: true,
+    };
 
     #[test]
     fn idf_never_goes_negative_for_common_terms() {
@@ -202,7 +216,11 @@ mod tests {
 
     #[test]
     fn length_normalisation_can_be_disabled() {
-        let no_norm = Bm25Params { k1: 1.2, b: 0.0 };
+        let no_norm = Bm25Params {
+            k1: 1.2,
+            b: 0.0,
+            stopwords: true,
+        };
         let short = term_score(3, 20, 100.0, 1.0, &no_norm);
         let long = term_score(3, 500, 100.0, 1.0, &no_norm);
         assert!((short - long).abs() < f32::EPSILON);

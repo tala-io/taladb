@@ -12,6 +12,13 @@
 - **Binary-quantized HNSW:** queries keep full precision during traversal, improving candidates without a rebuild, and construction compares packed codes directly.
 - **Fewer HNSW allocations:** traversal reuses buffers, visited sets and heaps; resumable builds reuse decoded nodes between steps.
 
+### Search and queries
+
+- **Stopwords in ranked full-text search:** `searchText` and the text side of `hybridSearch` drop common English function words ("to", "the", "and", …) from the query. Under OR semantics a query like "kind to a classmate" matched every document containing "to"; every app had to strip these itself. Filtering happens at query time only, so existing FTS indexes need no rebuild, and a query made only of stopwords is searched as typed. Turn it off with `stopwords: false` in the BM25 options (Node, web, FFI, Kotlin) or `Bm25Params { stopwords: false, .. }`. Rankings for queries that contain stopwords change.
+- **Projection can exclude fields:** `FindOptions` gains `exclude`, the complement of `fields`, for leaving out one large field such as an embedding. `_id` is always returned.
+- **Projected live queries:** `Collection::watch_with_options` and the C FFI's `taladb_watch_with_options` apply `FindOptions` to every snapshot, so a screen watching documents that carry embeddings no longer receives every vector on every write. `taladb_watch` is unchanged and now delegates to it. The FFI `find` operation accepts the same `{"fields", "exclude"}` options. The additions are backwards compatible, so the ABI version stays 2.
+- Rust callers that build `FindOptions` or `Bm25Params` with struct literals and no `..Default::default()` must add the new fields.
+
 ### Other
 
 - The engine is now the `taladb` crate on crates.io, usable as the local database of any Rust application.

@@ -75,6 +75,17 @@ describe.skipIf(!nativeAvailable)('text + hybrid search (native engine)', () => 
     expect(hits.every((h) => h.document.locale === 'en')).toBe(true);
   });
 
+  it('searchText drops stopwords unless told not to', async () => {
+    const articles = db.collection<Article>('articles');
+    // "how to" alone would match every body containing "to"; only "reset" counts.
+    const hits = await articles.searchText('body', 'how to reset', 10);
+    expect(hits.map((h) => h.document.title)).toEqual(['reset']);
+    const all = await articles.searchText('body', 'your', 10, undefined, { stopwords: false });
+    expect(all.map((h) => h.document.title).sort()).toEqual(['billing', 'reset']);
+    const none = await articles.searchText('body', 'update your', 10);
+    expect(none.map((h) => h.document.title)).toEqual(['billing']);
+  });
+
   it('hybridSearch recovers an exact term the vector side would miss', async () => {
     // Query vector points at TOPIC_A, but the exact SKU (TOPIC_B) should win.
     const hits = await db.collection<Article>('articles').hybridSearch(

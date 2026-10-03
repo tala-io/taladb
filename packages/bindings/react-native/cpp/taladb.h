@@ -47,7 +47,7 @@
  * - 2 — the six index create/drop functions return `int32_t` instead of
  *   `void`; `taladb_call`, `taladb_ffi_abi_version`, `taladb_last_error_code`
  *   and the live-query functions (`taladb_watch`, `taladb_watch_next`,
- *   `taladb_watch_close`) added.
+ *   `taladb_watch_close`, `taladb_watch_with_options`) added.
  */
 #define TALADB_FFI_ABI_VERSION 2
 
@@ -455,6 +455,23 @@ char *taladb_call(struct TalaDbHandle *handle, const char *op, const char *args_
 struct TalaDbWatch *taladb_watch(struct TalaDbHandle *handle,
                                  const char *collection,
                                  const char *filter_json);
+
+/**
+ * [`taladb_watch`], with each snapshot projected like `find`'s options:
+ * `{"fields": [..]}` keeps only those fields, `{"exclude": [..]}` drops them.
+ * A NULL or `"null"` `options_json` is the same as `taladb_watch`.
+ *
+ * Every write sends a fresh snapshot across to the caller, so excluding a
+ * large field the caller does not display (an embedding) keeps each update
+ * small.
+ *
+ * # Safety
+ * As for [`taladb_watch`]; `options_json` may be NULL.
+ */
+struct TalaDbWatch *taladb_watch_with_options(struct TalaDbHandle *handle,
+                                              const char *collection,
+                                              const char *filter_json,
+                                              const char *options_json);
 
 /**
  * Wait up to `timeout_ms` for a write to the watched collection.

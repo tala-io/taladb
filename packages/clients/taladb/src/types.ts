@@ -71,6 +71,13 @@ export interface TextSearchOptions {
    * length; `1` normalises fully by length relative to the corpus average.
    */
   b?: number;
+  /**
+   * Drop common English words ("to", "the", "and", …) from the query before
+   * ranking, so they do not match nearly every document (default `true`). A
+   * query made only of such words is searched as typed. Documents are indexed
+   * in full either way, so changing this needs no reindex.
+   */
+  stopwords?: boolean;
 }
 
 export interface HybridSearchResult<T extends Document = Document> {
