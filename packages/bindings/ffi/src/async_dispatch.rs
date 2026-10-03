@@ -73,12 +73,15 @@ pub(super) fn execute(h: &TalaDbHandle, op: &str, args: &[Json]) -> Result<Json,
                     .collect::<Vec<_>>()
             )
         }
-        "find" => json!(
-            core!(col.find(filter(args, 1)?))
-                .iter()
-                .map(doc_to_json)
-                .collect::<Vec<_>>()
-        ),
+        // An optional third argument projects the results: `{"fields": [..]}`
+        // keeps only those fields, `{"exclude": [..]}` drops them.
+        "find" => {
+            let docs = match crate::find_options(args.get(2))? {
+                Some(options) => core!(col.find_with_options(filter(args, 1)?, options)),
+                None => core!(col.find(filter(args, 1)?)),
+            };
+            json!(docs.iter().map(doc_to_json).collect::<Vec<_>>())
+        }
         "findOne" => core!(col.find_one(filter(args, 1)?))
             .as_ref()
             .map(doc_to_json)

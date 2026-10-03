@@ -72,6 +72,7 @@ await articles.searchText('body', 'invoice', 10, { locale: 'en' }, { k1: 1.5, b:
 | --- | --- | --- | --- |
 | `k1` | `number` | `1.2` | Term-frequency saturation. Higher lets repeated terms keep adding relevance. |
 | `b` | `number` | `0.75` | Length normalisation. `0` ignores document length; `1` normalises fully. |
+| `stopwords` | `boolean` | `true` | Drop common English words ("to", "the", "and", …) from the query, so they do not match nearly every document. A query made only of such words is searched as typed. Documents are indexed in full either way. |
 
 **Errors:**
 

@@ -56,6 +56,7 @@ impl SortSpec {
 ///     skip: 20,
 ///     limit: Some(10),
 ///     fields: Some(vec!["name".into(), "email".into()]),
+///     exclude: None,
 ///     timeout: Some(std::time::Duration::from_secs(5)),
 /// };
 /// ```
@@ -71,6 +72,11 @@ pub struct FindOptions {
     /// If `Some`, only the listed fields (plus `_id`) are returned.
     /// Fields not in the list are stripped from each document.
     pub fields: Option<Vec<String>>,
+    /// If `Some`, these fields are stripped from each document — the
+    /// complement of `fields`, for when a document has one large field the
+    /// caller does not need (an embedding). `_id` is never removed. Applied
+    /// after `fields` if both are set.
+    pub exclude: Option<Vec<String>>,
     /// If `Some`, the query will return [`TalaDbError::QueryTimeout`] if
     /// it runs longer than the specified duration.  The check is performed
     /// between documents in the filter loop, so the actual elapsed time may
@@ -228,5 +234,12 @@ pub fn partial_sort_documents(docs: &mut Vec<Document>, sort: &[SortSpec], keep:
 /// Apply a projection to a document: keep only the listed fields (plus `_id`).
 pub fn project_document(mut doc: Document, fields: &[String]) -> Document {
     doc.fields.retain(|(k, _)| fields.iter().any(|f| f == k));
+    doc
+}
+
+/// Remove the listed fields from a document. `_id` is not a field here — it
+/// lives in `doc.id` — so it can never be excluded.
+pub fn exclude_fields(mut doc: Document, exclude: &[String]) -> Document {
+    doc.fields.retain(|(k, _)| !exclude.iter().any(|f| f == k));
     doc
 }

@@ -618,6 +618,11 @@ fn bm25_from_options(options: Option<&serde_json::Value>) -> taladb_core::bm25::
         if let Some(v) = o.get("b").and_then(serde_json::Value::as_f64) {
             params.b = v as f32;
         }
+        // "stopwords": false searches every query word, as before stopword
+        // filtering existed. Defaults to true.
+        if let Some(v) = o.get("stopwords").and_then(serde_json::Value::as_bool) {
+            params.stopwords = v;
+        }
     }
     params
 }

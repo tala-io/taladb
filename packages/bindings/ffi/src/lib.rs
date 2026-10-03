@@ -189,7 +189,7 @@ pub extern "C" fn taladb_last_error_code() -> *const c_char {
 /// - 2 — the six index create/drop functions return `int32_t` instead of
 ///   `void`; `taladb_call`, `taladb_ffi_abi_version`, `taladb_last_error_code`
 ///   and the live-query functions (`taladb_watch`, `taladb_watch_next`,
-///   `taladb_watch_close`) added.
+///   `taladb_watch_close`, `taladb_watch_with_options`) added.
 pub const TALADB_FFI_ABI_VERSION: u32 = 2;
 
 /// The [`TALADB_FFI_ABI_VERSION`] this library was built with.
@@ -1364,8 +1364,47 @@ fn bm25_from_options(options: Option<&serde_json::Value>) -> taladb_core::bm25::
         if let Some(v) = o.get("b").and_then(serde_json::Value::as_f64) {
             params.b = v as f32;
         }
+        // "stopwords": false searches every query word, as before stopword
+        // filtering existed. Defaults to true.
+        if let Some(v) = o.get("stopwords").and_then(serde_json::Value::as_bool) {
+            params.stopwords = v;
+        }
     }
     params
+}
+
+/// Projection options for `find` and `taladb_watch_with_options`:
+/// `{"fields": ["a", "b"]}` keeps only those fields (plus `_id`),
+/// `{"exclude": ["embedding"]}` drops them. Absent or `null` means no options.
+pub(crate) fn find_options(
+    options: Option<&serde_json::Value>,
+) -> Result<Option<taladb_core::FindOptions>, String> {
+    let Some(o) = options.filter(|v| !v.is_null()) else {
+        return Ok(None);
+    };
+    let o = o.as_object().ok_or("find options must be a JSON object")?;
+    let names = |key: &str| -> Result<Option<Vec<String>>, String> {
+        match o.get(key) {
+            None | Some(serde_json::Value::Null) => Ok(None),
+            Some(serde_json::Value::Array(items)) => items
+                .iter()
+                .map(|v| {
+                    v.as_str().map(str::to_owned).ok_or_else(|| {
+                        format!("find option \"{key}\" must be an array of field names")
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(Some),
+            Some(_) => Err(format!(
+                "find option \"{key}\" must be an array of field names"
+            )),
+        }
+    };
+    Ok(Some(taladb_core::FindOptions {
+        fields: names("fields")?,
+        exclude: names("exclude")?,
+        ..Default::default()
+    }))
 }
 
 fn rrf_from_options(options: Option<&serde_json::Value>) -> taladb_core::bm25::RrfParams {
@@ -2205,6 +2244,26 @@ pub unsafe extern "C" fn taladb_watch(
     collection: *const c_char,
     filter_json: *const c_char,
 ) -> *mut TalaDbWatch {
+    unsafe { taladb_watch_with_options(handle, collection, filter_json, std::ptr::null()) }
+}
+
+/// [`taladb_watch`], with each snapshot projected like `find`'s options:
+/// `{"fields": [..]}` keeps only those fields, `{"exclude": [..]}` drops them.
+/// A NULL or `"null"` `options_json` is the same as `taladb_watch`.
+///
+/// Every write sends a fresh snapshot across to the caller, so excluding a
+/// large field the caller does not display (an embedding) keeps each update
+/// small.
+///
+/// # Safety
+/// As for [`taladb_watch`]; `options_json` may be NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn taladb_watch_with_options(
+    handle: *mut TalaDbHandle,
+    collection: *const c_char,
+    filter_json: *const c_char,
+    options_json: *const c_char,
+) -> *mut TalaDbWatch {
     ffi_guard(std::ptr::null_mut(), move || {
         clear_last_error();
         let (Some(h), Some(col)) = (unsafe { ptr_to_ref(handle) }, unsafe {
@@ -2219,9 +2278,29 @@ pub unsafe extern "C" fn taladb_watch(
                 return std::ptr::null_mut();
             }
         };
+        let options = if options_json.is_null() {
+            None
+        } else {
+            let Some(text) = (unsafe { cstr_to_string(options_json) }) else {
+                return std::ptr::null_mut();
+            };
+            match serde_json::from_str::<serde_json::Value>(&text)
+                .map_err(|e| format!("invalid find options JSON: {e}"))
+                .and_then(|v| find_options(Some(&v)))
+            {
+                Ok(o) => o,
+                Err(e) => {
+                    set_last_error(e);
+                    return std::ptr::null_mut();
+                }
+            }
+        };
         match h.db.collection(&col) {
             Ok(c) => Box::into_raw(Box::new(TalaDbWatch {
-                inner: Mutex::new(c.watch(filter)),
+                inner: Mutex::new(match options {
+                    Some(options) => c.watch_with_options(filter, options),
+                    None => c.watch(filter),
+                }),
             })),
             Err(e) => {
                 set_last_error(engine_error(e));
@@ -3455,6 +3534,145 @@ mod tests {
             assert!(unsafe { taladb_job_take_result(job) }.is_null());
             assert_eq!(last_error_code().as_deref(), Some("InvalidFilter"));
         }
+        unsafe { taladb_close(handle) };
+    }
+
+    fn call_json(handle: *mut TalaDbHandle, op: &str, args: &str) -> serde_json::Value {
+        let (op, args) = (cstr(op), cstr(args));
+        let out = unsafe { taladb_call(handle, op.as_ptr(), args.as_ptr()) };
+        assert!(!out.is_null(), "{op:?} failed: {:?}", last_error());
+        let text = unsafe { CStr::from_ptr(out) }
+            .to_string_lossy()
+            .into_owned();
+        unsafe { taladb_free_string(out) };
+        serde_json::from_str(&text).unwrap()
+    }
+
+    /// `find` takes an optional projection: the embedding never crosses the FFI.
+    #[test]
+    fn find_projects_with_fields_and_exclude() {
+        let (handle, _dir) = open_temp_db();
+        call_json(
+            handle,
+            "insert",
+            r#"["notes", {"text": "Read aloud", "embedding": [0.1, 0.2]}]"#,
+        );
+        let docs = call_json(
+            handle,
+            "find",
+            r#"["notes", {}, {"exclude": ["embedding"]}]"#,
+        );
+        assert!(docs[0].get("embedding").is_none());
+        assert_eq!(docs[0]["text"], "Read aloud");
+        assert!(docs[0].get("_id").is_some());
+
+        let docs = call_json(
+            handle,
+            "find",
+            r#"["notes", {}, {"fields": ["embedding"]}]"#,
+        );
+        assert!(docs[0].get("text").is_none());
+        assert!(docs[0].get("embedding").is_some());
+
+        // No third argument, or null: unchanged.
+        assert!(
+            call_json(handle, "find", r#"["notes", {}]"#)[0]
+                .get("embedding")
+                .is_some()
+        );
+        assert!(
+            call_json(handle, "find", r#"["notes", {}, null]"#)[0]
+                .get("embedding")
+                .is_some()
+        );
+
+        let (op, bad) = (
+            cstr("find"),
+            cstr(r#"["notes", {}, {"exclude": "embedding"}]"#),
+        );
+        assert!(unsafe { taladb_call(handle, op.as_ptr(), bad.as_ptr()) }.is_null());
+        assert!(last_error().unwrap().contains("array of field names"));
+        unsafe { taladb_close(handle) };
+    }
+
+    #[test]
+    fn watch_with_options_projects_every_snapshot() {
+        let (handle, _dir) = open_temp_db();
+        call_json(
+            handle,
+            "insert",
+            r#"["notes", {"text": "First", "embedding": [0.1]}]"#,
+        );
+        let (col, opts) = (cstr("notes"), cstr(r#"{"exclude": ["embedding"]}"#));
+        let watch = unsafe {
+            taladb_watch_with_options(handle, col.as_ptr(), std::ptr::null(), opts.as_ptr())
+        };
+        assert!(!watch.is_null(), "{:?}", last_error());
+        call_json(
+            handle,
+            "insert",
+            r#"["notes", {"text": "Second", "embedding": [0.2]}]"#,
+        );
+        let mut out: *mut c_char = std::ptr::null_mut();
+        assert_eq!(unsafe { taladb_watch_next(watch, 5_000, &mut out) }, 1);
+        let snapshot: serde_json::Value =
+            serde_json::from_str(&unsafe { CStr::from_ptr(out) }.to_string_lossy()).unwrap();
+        unsafe { taladb_free_string(out) };
+        assert_eq!(snapshot.as_array().unwrap().len(), 2);
+        assert!(
+            snapshot
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|d| d.get("embedding").is_none())
+        );
+        unsafe {
+            taladb_watch_close(watch);
+            taladb_close(handle);
+        }
+    }
+
+    #[test]
+    fn watch_with_options_rejects_bad_options_with_a_message() {
+        let (handle, _dir) = open_temp_db();
+        let (col, opts) = (cstr("notes"), cstr("not json"));
+        assert!(
+            unsafe {
+                taladb_watch_with_options(handle, col.as_ptr(), std::ptr::null(), opts.as_ptr())
+            }
+            .is_null()
+        );
+        assert!(last_error().unwrap().contains("invalid find options JSON"));
+        unsafe { taladb_close(handle) };
+    }
+
+    /// Stopwords are dropped from ranked queries by default; `"stopwords": false` keeps them.
+    #[test]
+    fn search_text_drops_stopwords_unless_told_not_to() {
+        let (handle, _dir) = open_temp_db();
+        call_json(handle, "createFtsIndex", r#"["notes", "text"]"#);
+        call_json(
+            handle,
+            "insert",
+            r#"["notes", {"text": "Invited a new classmate to join"}]"#,
+        );
+        call_json(
+            handle,
+            "insert",
+            r#"["notes", {"text": "Counted by fives to 100"}]"#,
+        );
+        let hits = call_json(
+            handle,
+            "searchText",
+            r#"["notes", "text", "kind to a classmate", 10, null, null]"#,
+        );
+        assert_eq!(hits.as_array().unwrap().len(), 1);
+        let hits = call_json(
+            handle,
+            "searchText",
+            r#"["notes", "text", "kind to a classmate", 10, null, {"stopwords": false}]"#,
+        );
+        assert_eq!(hits.as_array().unwrap().len(), 2);
         unsafe { taladb_close(handle) };
     }
 

@@ -23,7 +23,8 @@ use crate::index::{
 use crate::query::executor::{execute, fetch_documents, index_ordered_entries};
 use crate::query::filter::Filter;
 use crate::query::options::{
-    FindOptions, SortDirection, partial_sort_documents, project_document, sort_documents,
+    FindOptions, SortDirection, exclude_fields, partial_sort_documents, project_document,
+    sort_documents,
 };
 use crate::query::planner::plan_full;
 use crate::time::now_ms;
@@ -229,6 +230,22 @@ impl Collection {
         let reader = self.clone_reader();
         crate::watch::create_watch(&self.watch_registry, filter, move |f| {
             reader.find(f.clone())
+        })
+    }
+
+    /// [`Collection::watch`], with each snapshot read through
+    /// [`Collection::find_with_options`] — sorted, paged and projected the same
+    /// way. Projection matters here: a snapshot crosses into the host language
+    /// on every write, so leaving out a large field (an embedding, say) keeps
+    /// each update small.
+    pub fn watch_with_options(
+        &self,
+        filter: Filter,
+        options: FindOptions,
+    ) -> crate::watch::WatchHandle {
+        let reader = self.clone_reader();
+        crate::watch::create_watch(&self.watch_registry, filter, move |f| {
+            reader.find_with_options(f.clone(), options.clone())
         })
     }
 
@@ -746,7 +763,12 @@ impl Collection {
 
         let tokens = {
             let (freqs, _) = token_frequencies(query);
-            freqs.into_keys().collect::<Vec<_>>()
+            let tokens = freqs.into_keys().collect::<Vec<_>>();
+            if params.stopwords {
+                crate::fts::without_stopwords(tokens)
+            } else {
+                tokens
+            }
         };
         if tokens.is_empty() || top_k == 0 {
             return Ok(vec![]);
@@ -2158,7 +2180,7 @@ impl Collection {
     /// 2. Sort (`options.sort`)
     /// 3. Skip (`options.skip`)
     /// 4. Limit (`options.limit`)
-    /// 5. Projection (`options.fields`)
+    /// 5. Projection (`options.fields`, then `options.exclude`)
     #[tracing::instrument(skip(self, filter, options), fields(collection = %self.name))]
     pub fn find_with_options(
         &self,
@@ -2229,6 +2251,12 @@ impl Collection {
             docs = docs
                 .into_iter()
                 .map(|d| project_document(d, fields))
+                .collect();
+        }
+        if let Some(ref exclude) = options.exclude {
+            docs = docs
+                .into_iter()
+                .map(|d| exclude_fields(d, exclude))
                 .collect();
         }
 

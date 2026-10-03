@@ -176,7 +176,7 @@ const hits = await posts.searchText('body', 'rust embedded database', 5)
 const all = await posts.find({ body: { $contains: 'rust embedded database' } })
 ```
 
-`searchText` accepts an optional metadata filter and `{ k1, b }` to tune term-frequency saturation and length normalisation. See [Search](/api/search) for the full API.
+`searchText` accepts an optional metadata filter and `{ k1, b }` to tune term-frequency saturation and length normalisation. Common English words such as "to" and "the" are dropped from the query unless you pass `stopwords: false`. See [Search](/api/search) for the full API.
 
 ## Hybrid search — keyword + vector, fused
 
