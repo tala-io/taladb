@@ -9,7 +9,7 @@ description: Learn what TalaDB is, how it works, and why it was built — the em
 
 AI inference is moving onto the device — transformers.js and ONNX Runtime Web in the browser, Core ML and native models on mobile. The model runs locally, but the *retrieval* layer usually doesn't: embeddings get shipped to a hosted vector database, which puts back the latency, the per-query cost, and the privacy exposure that running locally was supposed to remove.
 
-**TalaDB is the embedded vector and document database for on-device AI.** Built in Rust, it runs entirely on the user's device across the browser, Node.js, and React Native. Store schemaless JSON-like documents in named **collections**, query them with a MongoDB-inspired filter DSL, and use secondary indexes, ACID transactions, and live queries — with no database server required.
+**TalaDB is the embedded vector and document database for on-device AI.** Built in Rust, it runs entirely on the user's device across the browser, Node.js, React Native, and native Android and iOS apps. Store schemaless JSON-like documents in named **collections**, query them with a MongoDB-inspired filter DSL, and use secondary indexes, ACID transactions, and live queries — with no database server required.
 
 Vector search is built into that same document model. Store embeddings alongside regular fields and search them with [vector similarity](/api/vector-search), [BM25 full-text](/api/search), or [hybrid search](/api/search#hybrid-search) (the two fused, RAG-style). A single query can rank by embedding similarity *and* filter by document metadata — with no API key and no data leaving the device.
 

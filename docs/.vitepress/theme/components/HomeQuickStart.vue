@@ -49,6 +49,9 @@
         <a href="/guide/web" class="qs-guide-link" v-if="activeTab === 'browser'">Full Browser Guide →</a>
         <a href="/guide/node" class="qs-guide-link" v-if="activeTab === 'node'">Full Node.js Guide →</a>
         <a href="/guide/react-native" class="qs-guide-link" v-if="activeTab === 'rn'">Full React Native Guide →</a>
+        <a href="/guide/android" class="qs-guide-link" v-if="activeTab === 'kotlin'">Full Android (Kotlin) Guide →</a>
+        <a href="/guide/swift" class="qs-guide-link" v-if="activeTab === 'swift'">Full iOS &amp; macOS (Swift) Guide →</a>
+        <a href="/guide/rust" class="qs-guide-link" v-if="activeTab === 'rust'">Full Rust Guide →</a>
       </div>
     </div>
   </section>
@@ -71,6 +74,9 @@ const tabs = [
   { id: 'browser', label: 'Browser / Vite' },
   { id: 'node',    label: 'Node.js' },
   { id: 'rn',      label: 'React Native' },
+  { id: 'kotlin',  label: 'Android (Kotlin)' },
+  { id: 'swift',   label: 'iOS (Swift)' },
+  { id: 'rust',    label: 'Rust' },
 ]
 
 const allTabs: Record<string, { steps: Array<{ title: string; desc?: string; lang: string; code: string; raw: string }> }> = {
@@ -199,6 +205,148 @@ const pinned = await notes.find({ pinned: true })`,
 
 <span class="token-keyword">await</span> notes<span class="token-punctuation">.</span><span class="token-function">insert</span><span class="token-punctuation">(</span><span class="token-punctuation">{</span> body<span class="token-punctuation">:</span> <span class="token-string">'Buy milk'</span><span class="token-punctuation">,</span> pinned<span class="token-punctuation">:</span> <span class="token-keyword">false</span> <span class="token-punctuation">})</span>
 <span class="token-keyword">const</span> pinned <span class="token-operator">=</span> <span class="token-keyword">await</span> notes<span class="token-punctuation">.</span><span class="token-function">find</span><span class="token-punctuation">(</span><span class="token-punctuation">{</span> pinned<span class="token-punctuation">:</span> <span class="token-keyword">true</span> <span class="token-punctuation">})</span>`,
+      },
+    ],
+  },
+  kotlin: {
+    steps: [
+      {
+        title: 'Add the dependency',
+        desc: 'Not on Maven Central yet — until it is, build the AAR from source as the Android guide describes.',
+        lang: 'build.gradle.kts',
+        raw: `dependencies {
+    implementation("dev.taladb:taladb-android:<version>")
+}`,
+        code: `dependencies <span class="token-punctuation">{</span>
+    <span class="token-function">implementation</span><span class="token-punctuation">(</span><span class="token-string">"dev.taladb:taladb-android:&lt;version&gt;"</span><span class="token-punctuation">)</span>
+<span class="token-punctuation">}</span>`,
+      },
+      {
+        title: 'Open a database and query',
+        desc: 'Every call is a suspend function that runs off the main thread.',
+        lang: 'Notes.kt',
+        raw: `@Serializable
+data class Note(
+    @SerialName("_id") val id: String? = null,
+    val title: String,
+    val pinned: Boolean = false,
+)
+
+val db = TalaDB.open(context.filesDir.resolve("app.db"))
+val notes = db.collection<Note>("notes")
+
+notes.insert(Note(title = "Buy milk"))
+val pinned = notes.find(buildJsonObject { put("pinned", true) })`,
+        code: `<span class="token-keyword">@Serializable</span>
+<span class="token-keyword">data</span> <span class="token-keyword">class</span> Note<span class="token-punctuation">(</span>
+    <span class="token-keyword">@SerialName</span><span class="token-punctuation">(</span><span class="token-string">"_id"</span><span class="token-punctuation">)</span> <span class="token-keyword">val</span> id<span class="token-punctuation">:</span> String<span class="token-punctuation">?</span> <span class="token-operator">=</span> <span class="token-keyword">null</span><span class="token-punctuation">,</span>
+    <span class="token-keyword">val</span> title<span class="token-punctuation">:</span> String<span class="token-punctuation">,</span>
+    <span class="token-keyword">val</span> pinned<span class="token-punctuation">:</span> Boolean <span class="token-operator">=</span> <span class="token-keyword">false</span><span class="token-punctuation">,</span>
+<span class="token-punctuation">)</span>
+
+<span class="token-keyword">val</span> db <span class="token-operator">=</span> TalaDB<span class="token-punctuation">.</span><span class="token-function">open</span><span class="token-punctuation">(</span>context<span class="token-punctuation">.</span>filesDir<span class="token-punctuation">.</span><span class="token-function">resolve</span><span class="token-punctuation">(</span><span class="token-string">"app.db"</span><span class="token-punctuation">)</span><span class="token-punctuation">)</span>
+<span class="token-keyword">val</span> notes <span class="token-operator">=</span> db<span class="token-punctuation">.</span><span class="token-function">collection</span><span class="token-punctuation">&lt;</span>Note<span class="token-punctuation">&gt;</span><span class="token-punctuation">(</span><span class="token-string">"notes"</span><span class="token-punctuation">)</span>
+
+notes<span class="token-punctuation">.</span><span class="token-function">insert</span><span class="token-punctuation">(</span>Note<span class="token-punctuation">(</span>title <span class="token-operator">=</span> <span class="token-string">"Buy milk"</span><span class="token-punctuation">)</span><span class="token-punctuation">)</span>
+<span class="token-keyword">val</span> pinned <span class="token-operator">=</span> notes<span class="token-punctuation">.</span><span class="token-function">find</span><span class="token-punctuation">(</span>buildJsonObject <span class="token-punctuation">{</span> <span class="token-function">put</span><span class="token-punctuation">(</span><span class="token-string">"pinned"</span><span class="token-punctuation">,</span> <span class="token-keyword">true</span><span class="token-punctuation">)</span> <span class="token-punctuation">}</span><span class="token-punctuation">)</span>`,
+      },
+    ],
+  },
+
+  swift: {
+    steps: [
+      {
+        title: 'Add the package',
+        desc: 'No tagged SwiftPM release yet — until there is, build it from source as the Swift guide describes.',
+        lang: 'Package.swift',
+        raw: `.package(url: "https://github.com/taladb/taladb-swift", from: "<version>")
+// target dependency: .product(name: "TalaDB", package: "taladb-swift")`,
+        code: `<span class="token-punctuation">.</span><span class="token-function">package</span><span class="token-punctuation">(</span>url<span class="token-punctuation">:</span> <span class="token-string">"https://github.com/taladb/taladb-swift"</span><span class="token-punctuation">,</span> from<span class="token-punctuation">:</span> <span class="token-string">"&lt;version&gt;"</span><span class="token-punctuation">)</span>
+<span class="token-comment">// target dependency: .product(name: "TalaDB", package: "taladb-swift")</span>`,
+      },
+      {
+        title: 'Open a database and query',
+        desc: 'Every call is async and runs off the calling thread.',
+        lang: 'Notes.swift',
+        raw: `import TalaDB
+
+struct Note: Codable, Sendable {
+    var id: String?
+    var title: String
+    var pinned = false
+    enum CodingKeys: String, CodingKey { case id = "_id", title, pinned }
+}
+
+let db = try await TalaDB.open(at: url)
+let notes = db.collection("notes", as: Note.self)
+
+try await notes.insert(Note(title: "Buy milk"))
+let pinned = try await notes.find(["pinned": true])`,
+        code: `<span class="token-keyword">import</span> TalaDB
+
+<span class="token-keyword">struct</span> Note<span class="token-punctuation">:</span> Codable<span class="token-punctuation">,</span> Sendable <span class="token-punctuation">{</span>
+    <span class="token-keyword">var</span> id<span class="token-punctuation">:</span> String<span class="token-punctuation">?</span>
+    <span class="token-keyword">var</span> title<span class="token-punctuation">:</span> String
+    <span class="token-keyword">var</span> pinned <span class="token-operator">=</span> <span class="token-keyword">false</span>
+    <span class="token-keyword">enum</span> CodingKeys<span class="token-punctuation">:</span> String<span class="token-punctuation">,</span> CodingKey <span class="token-punctuation">{</span> <span class="token-keyword">case</span> id <span class="token-operator">=</span> <span class="token-string">"_id"</span><span class="token-punctuation">,</span> title<span class="token-punctuation">,</span> pinned <span class="token-punctuation">}</span>
+<span class="token-punctuation">}</span>
+
+<span class="token-keyword">let</span> db <span class="token-operator">=</span> <span class="token-keyword">try</span> <span class="token-keyword">await</span> TalaDB<span class="token-punctuation">.</span><span class="token-function">open</span><span class="token-punctuation">(</span>at<span class="token-punctuation">:</span> url<span class="token-punctuation">)</span>
+<span class="token-keyword">let</span> notes <span class="token-operator">=</span> db<span class="token-punctuation">.</span><span class="token-function">collection</span><span class="token-punctuation">(</span><span class="token-string">"notes"</span><span class="token-punctuation">,</span> as<span class="token-punctuation">:</span> Note<span class="token-punctuation">.</span>self<span class="token-punctuation">)</span>
+
+<span class="token-keyword">try</span> <span class="token-keyword">await</span> notes<span class="token-punctuation">.</span><span class="token-function">insert</span><span class="token-punctuation">(</span>Note<span class="token-punctuation">(</span>title<span class="token-punctuation">:</span> <span class="token-string">"Buy milk"</span><span class="token-punctuation">)</span><span class="token-punctuation">)</span>
+<span class="token-keyword">let</span> pinned <span class="token-operator">=</span> <span class="token-keyword">try</span> <span class="token-keyword">await</span> notes<span class="token-punctuation">.</span><span class="token-function">find</span><span class="token-punctuation">(</span><span class="token-punctuation">[</span><span class="token-string">"pinned"</span><span class="token-punctuation">:</span> <span class="token-keyword">true</span><span class="token-punctuation">]</span><span class="token-punctuation">)</span>`,
+      },
+    ],
+  },
+
+  rust: {
+    steps: [
+      {
+        title: 'Install',
+        lang: 'bash',
+        raw: `cargo add taladb serde --features serde/derive
+cargo add serde_json`,
+        code: `<span class="token-punctuation">$</span> cargo add taladb serde --features serde/derive
+<span class="token-punctuation">$</span> cargo add serde_json`,
+      },
+      {
+        title: 'Open a database and query',
+        lang: 'main.rs',
+        raw: `use serde::{Deserialize, Serialize};
+use serde_json::json;
+
+#[derive(Serialize, Deserialize)]
+struct Note {
+    title: String,
+    pinned: bool,
+}
+
+fn main() -> Result<(), taladb::TalaDbError> {
+    let db = taladb::open("app.db")?;
+    let notes = db.typed::<Note>("notes")?;
+
+    notes.insert(&Note { title: "Buy milk".into(), pinned: false })?;
+    let pinned: Vec<Note> = notes.find(json!({ "pinned": true }))?;
+    Ok(())
+}`,
+        code: `<span class="token-keyword">use</span> serde<span class="token-punctuation">:</span><span class="token-punctuation">:</span><span class="token-punctuation">{</span>Deserialize<span class="token-punctuation">,</span> Serialize<span class="token-punctuation">}</span><span class="token-punctuation">;</span>
+<span class="token-keyword">use</span> serde_json<span class="token-punctuation">:</span><span class="token-punctuation">:</span>json<span class="token-punctuation">;</span>
+
+<span class="token-keyword">#[derive</span><span class="token-punctuation">(</span>Serialize<span class="token-punctuation">,</span> Deserialize<span class="token-punctuation">)</span><span class="token-punctuation">]</span>
+<span class="token-keyword">struct</span> Note <span class="token-punctuation">{</span>
+    title<span class="token-punctuation">:</span> String<span class="token-punctuation">,</span>
+    pinned<span class="token-punctuation">:</span> bool<span class="token-punctuation">,</span>
+<span class="token-punctuation">}</span>
+
+<span class="token-keyword">fn</span> <span class="token-function">main</span><span class="token-punctuation">(</span><span class="token-punctuation">)</span> -<span class="token-punctuation">&gt;</span> Result<span class="token-punctuation">&lt;</span><span class="token-punctuation">(</span><span class="token-punctuation">)</span><span class="token-punctuation">,</span> taladb<span class="token-punctuation">:</span><span class="token-punctuation">:</span>TalaDbError<span class="token-punctuation">&gt;</span> <span class="token-punctuation">{</span>
+    <span class="token-keyword">let</span> db <span class="token-operator">=</span> taladb<span class="token-punctuation">:</span><span class="token-punctuation">:</span><span class="token-function">open</span><span class="token-punctuation">(</span><span class="token-string">"app.db"</span><span class="token-punctuation">)</span><span class="token-punctuation">?</span><span class="token-punctuation">;</span>
+    <span class="token-keyword">let</span> notes <span class="token-operator">=</span> db<span class="token-punctuation">.</span>typed<span class="token-punctuation">:</span><span class="token-punctuation">:</span><span class="token-punctuation">&lt;</span>Note<span class="token-punctuation">&gt;</span><span class="token-punctuation">(</span><span class="token-string">"notes"</span><span class="token-punctuation">)</span><span class="token-punctuation">?</span><span class="token-punctuation">;</span>
+
+    notes<span class="token-punctuation">.</span><span class="token-function">insert</span><span class="token-punctuation">(</span><span class="token-punctuation">&amp;</span>Note <span class="token-punctuation">{</span> title<span class="token-punctuation">:</span> <span class="token-string">"Buy milk"</span><span class="token-punctuation">.</span><span class="token-function">into</span><span class="token-punctuation">(</span><span class="token-punctuation">)</span><span class="token-punctuation">,</span> pinned<span class="token-punctuation">:</span> <span class="token-keyword">false</span> <span class="token-punctuation">}</span><span class="token-punctuation">)</span><span class="token-punctuation">?</span><span class="token-punctuation">;</span>
+    <span class="token-keyword">let</span> pinned<span class="token-punctuation">:</span> Vec<span class="token-punctuation">&lt;</span>Note<span class="token-punctuation">&gt;</span> <span class="token-operator">=</span> notes<span class="token-punctuation">.</span><span class="token-function">find</span><span class="token-punctuation">(</span>json<span class="token-punctuation">!</span><span class="token-punctuation">(</span><span class="token-punctuation">{</span> <span class="token-string">"pinned"</span><span class="token-punctuation">:</span> <span class="token-keyword">true</span> <span class="token-punctuation">}</span><span class="token-punctuation">)</span><span class="token-punctuation">)</span><span class="token-punctuation">?</span><span class="token-punctuation">;</span>
+    Ok<span class="token-punctuation">(</span><span class="token-punctuation">(</span><span class="token-punctuation">)</span><span class="token-punctuation">)</span>
+<span class="token-punctuation">}</span>`,
       },
     ],
   },

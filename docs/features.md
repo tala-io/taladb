@@ -5,7 +5,7 @@ description: Document storage and vector similarity search in one embedded datab
 
 # Features
 
-TalaDB combines a full document database with built-in vector search. Documents, metadata, and embeddings share one embedded engine, one transactional model, and one TypeScript API across the browser, Node.js, and React Native.
+TalaDB combines a full document database with built-in vector search. Documents, metadata, and embeddings share one embedded engine, one transactional model, and one TypeScript API across the browser, Node.js, and React Native — with native [Kotlin](/guide/android), [Swift](/guide/swift), and [Rust](/guide/rust) APIs over the same engine.
 
 ## Vector index and similarity search
 
@@ -218,7 +218,7 @@ In the browser, writes from *other tabs* trigger subscriptions too (via `Broadca
 
 ## Encryption at rest
 
-Pass a `passphrase` to `openDB` (Node.js and the browser) — or to `TalaDBModule.initialize` on React Native — and every value is transparently encrypted with **AES-GCM-256** before it touches disk, on all three runtimes:
+Pass a `passphrase` to `openDB` (Node.js and the browser) — or to `TalaDBModule.initialize` on React Native, or `TalaDBConfig(passphrase:)` in Kotlin and Swift — and every value is transparently encrypted with **AES-GCM-256** before it touches disk, on every runtime:
 
 ```ts
 const db = await openDB('myapp.db', { passphrase: userSuppliedPassphrase })

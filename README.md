@@ -70,7 +70,9 @@ Early-release packages may still change their APIs, and the Kotlin and Swift pac
 
 ### Install
 
-Every app installs the unified **`taladb`** package plus **one runtime binding** for its platform. Everything else is optional.
+JavaScript apps (browser, Node.js, React Native) install the unified **`taladb`** package plus **one runtime binding** for their platform. Native Android, iOS/macOS and Rust apps use their own package instead — see [Native apps](#native-apps-kotlin-swift-rust) below.
+
+#### JavaScript and TypeScript
 
 **Web app (browser)**
 
@@ -99,6 +101,31 @@ pnpm add taladb @taladb/node                 # required
 | `@taladb/react-native` | — | ✅ required | — | React Native (JSI) binding |
 | `@taladb/node` | — | — | ✅ required | Node.js native binding |
 | `@taladb/react` | ⭕ optional | ⭕ optional | — | React / React Native hooks |
+
+#### Native apps (Kotlin, Swift, Rust)
+
+**Android (Kotlin)** — [`taladb-kotlin`](https://github.com/taladb/taladb-kotlin), `minSdk` 24+, Kotlin 2.2+
+
+```kotlin
+dependencies {
+    implementation("dev.taladb:taladb-android:<version>")
+}
+```
+
+**iOS & macOS (Swift)** — [`taladb-swift`](https://github.com/taladb/taladb-swift), iOS 13+ / macOS 10.15+, Swift 5.9+
+
+```swift
+.package(url: "https://github.com/taladb/taladb-swift", from: "<version>")
+// target dependency: .product(name: "TalaDB", package: "taladb-swift")
+```
+
+**Rust** — the engine crate itself, Rust 1.90+
+
+```bash
+cargo add taladb
+```
+
+The Kotlin and Swift packages are not on Maven Central or tagged for SwiftPM yet; until they are, build them from source as described in the [Kotlin guide](https://taladb.dev/guide/android#build-from-source) and [Swift guide](https://taladb.dev/guide/swift#build-from-source). The examples below use the TypeScript API; each native guide has the same examples in Kotlin, Swift or Rust.
 
 ### Quick start
 
@@ -285,7 +312,8 @@ const db = await openDB('app.db', {
 })
 ```
 
-Identical on all three runtimes. Delivery is at most once — it is a notification
+Identical on the web, Node.js and React Native (webhooks are delivered by the
+TypeScript client, so the Kotlin, Swift and Rust packages don't send them). Delivery is at most once — it is a notification
 channel, not a replication log. See [/api/webhook](https://taladb.dev/api/webhook).
 
 ## Documentation
@@ -300,9 +328,16 @@ Full documentation is at **[taladb.dev](https://taladb.dev)**.
 | Web (Browser / WASM) guide | [/guide/web](https://taladb.dev/guide/web) |
 | Node.js guide | [/guide/node](https://taladb.dev/guide/node) |
 | React Native guide | [/guide/react-native](https://taladb.dev/guide/react-native) |
+| Android (Kotlin) guide | [/guide/android](https://taladb.dev/guide/android) |
+| iOS & macOS (Swift) guide | [/guide/swift](https://taladb.dev/guide/swift) |
+| Rust guide | [/guide/rust](https://taladb.dev/guide/rust) |
+| React hooks | [/guide/react](https://taladb.dev/guide/react) |
+| CLI dev tools | [/guide/cli](https://taladb.dev/guide/cli) |
 | Collection API | [/api/collection](https://taladb.dev/api/collection) |
 | Filters | [/api/filters](https://taladb.dev/api/filters) |
 | Updates | [/api/updates](https://taladb.dev/api/updates) |
+| Vector search | [/api/vector-search](https://taladb.dev/api/vector-search) |
+| Full-text & hybrid search | [/api/search](https://taladb.dev/api/search) |
 | Migrations | [/api/migrations](https://taladb.dev/api/migrations) |
 | Encryption | [/api/encryption](https://taladb.dev/api/encryption) |
 | Live queries | [/api/live-queries](https://taladb.dev/api/live-queries) |

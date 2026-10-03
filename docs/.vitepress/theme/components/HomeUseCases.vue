@@ -58,12 +58,12 @@ const useCases = [
   {
     icon: `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="2" width="14" height="20" rx="2" ry="2"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg>`,
     iconBg: 'rgba(16,185,129,0.1)',
-    title: 'React Native Mobile',
-    platforms: ['iOS', 'Android', 'JSI'],
-    desc: 'The JSI HostObject gives you synchronous database access without bridges. Store user data, search history, and embeddings directly on the device.',
+    title: 'Mobile Apps',
+    platforms: ['React Native', 'Kotlin', 'Swift'],
+    desc: 'Use the React Native JSI binding, or the native Kotlin and Swift packages for Android and iOS apps. Store user data, search history, and embeddings directly on the device.',
     bullets: [
-      'Synchronous reads via JSI — no async overhead',
-      'Same TypeScript API as web and Node.js',
+      'Synchronous reads via JSI — no bridge in React Native',
+      'Coroutines in Kotlin, async/await in Swift',
       'AES-GCM-256 encryption for sensitive user data',
     ],
   },
@@ -71,8 +71,8 @@ const useCases = [
     icon: `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>`,
     iconBg: 'rgba(139,92,246,0.1)',
     title: 'CLI Tools & Scripts',
-    platforms: ['Node.js', 'Bun'],
-    desc: 'Use TalaDB as a fast, embedded document store for CLI tools, build pipelines, and data transformation scripts — no database server to spin up.',
+    platforms: ['Node.js', 'Bun', 'Rust'],
+    desc: 'Use TalaDB as a fast, embedded document store for CLI tools, build pipelines, and data transformation scripts — from Node.js, or straight from Rust with the taladb crate. No database server to spin up.',
     bullets: [
       'Native napi-rs module — no serialization overhead',
       'ACID transactions for safe concurrent writes',

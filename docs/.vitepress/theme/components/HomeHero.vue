@@ -16,7 +16,8 @@
         <p class="hero-sub">
           Store JSON-like documents, run structured queries, and search vectors
           in one Rust engine. TalaDB runs entirely on-device across the browser,
-          Node.js, and React Native — no database server or cloud API required.
+          Node.js, React Native, and native Android and iOS apps — no database
+          server or cloud API required.
         </p>
 
         <div class="hero-actions">

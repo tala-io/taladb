@@ -10,10 +10,11 @@ on:
     paths-ignore:
       - "**.md"
       - "docs/**"
-      - "LICENSE"
-  # No paths-ignore here on purpose: `ci-pass` is the required status check in
-  # branch protection, and a skipped workflow never reports one — a docs-only PR
-  # would hang forever on "Waiting for status".
+      - "LICENSE*"
+  # No paths-ignore here on purpose: `ci-pass` is meant to be the required
+  # status check, and a skipped workflow never reports one — a docs-only PR
+  # would hang forever on "Waiting for status". `setup` detects docs-only PRs
+  # instead, the build and test jobs skip, and `ci-pass` still reports.
   pull_request:
     branches: [main, dev]
   workflow_dispatch:
@@ -47,7 +48,29 @@ jobs:
     outputs:
       node: ${{ steps.matrix.outputs.node }}
       cli: ${{ steps.matrix.outputs.cli }}
+      code: ${{ steps.changes.outputs.code }}
     steps:
+      - uses: actions/checkout@v4
+        if: github.event_name == 'pull_request'
+        with:
+          fetch-depth: 2
+
+      # The same files the push trigger ignores. Pushes and manual runs always
+      # build: the push filter already dropped docs-only pushes.
+      - name: Detect code changes
+        id: changes
+        run: |
+          if [ "${{ github.event_name }}" != pull_request ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # HEAD is GitHub's merge of the PR into its base; its first parent is the base.
+          changed="$(git diff --name-only HEAD^1 HEAD)"
+          echo "$changed"
+          if grep -qvE '^docs/|\.md$|^LICENSE' <<<"$changed"; then code=true; else code=false; fi
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "Code changed: $code"
+
       - name: Pick matrix for ${{ github.event_name }}
         id: matrix
         run: |
@@ -71,6 +94,8 @@ jobs:
   rust-check:
     name: Rust — fmt / clippy / test
     runs-on: ubuntu-latest
+    needs: setup
+    if: needs.setup.outputs.code == 'true'
 
     steps:
       - uses: actions/checkout@v4
@@ -163,6 +188,8 @@ jobs:
   rust-audit:
     name: Rust — cargo audit
     runs-on: ubuntu-latest
+    needs: setup
+    if: needs.setup.outputs.code == 'true'
 
     steps:
       - uses: actions/checkout@v4
@@ -195,6 +222,8 @@ jobs:
   rust-msrv:
     name: Rust — MSRV
     runs-on: ubuntu-latest
+    needs: setup
+    if: needs.setup.outputs.code == 'true'
 
     steps:
       - uses: actions/checkout@v4
@@ -235,6 +264,8 @@ jobs:
   rust-miri:
     name: Rust — miri (FFI pointer layer)
     runs-on: ubuntu-latest
+    needs: setup
+    if: needs.setup.outputs.code == 'true'
 
     steps:
       - uses: actions/checkout@v4
@@ -277,6 +308,8 @@ jobs:
   rust-fuzz:
     name: Rust — fuzz (smoke)
     runs-on: ubuntu-latest
+    needs: setup
+    if: needs.setup.outputs.code == 'true'
 
     steps:
       - uses: actions/checkout@v4
@@ -328,6 +361,8 @@ jobs:
   ts-check:
     name: TypeScript — type check
     runs-on: ubuntu-latest
+    needs: setup
+    if: needs.setup.outputs.code == 'true'
 
     steps:
       - uses: actions/checkout@v4
@@ -390,6 +425,8 @@ jobs:
   rn-native:
     name: React Native — native glue
     runs-on: ubuntu-latest
+    needs: setup
+    if: needs.setup.outputs.code == 'true'
 
     steps:
       - uses: actions/checkout@v4
@@ -759,11 +796,16 @@ jobs:
       - build-taladb-react
     if: always()
     steps:
-      # Every job above runs unconditionally, so `skipped` here means an
-      # upstream job failed and its dependents never ran — treat it as a
-      # failure, otherwise the gate would go green on a broken run.
+      # Apart from docs-only pull requests (handled first), every job above
+      # runs, so `skipped` means an upstream job failed and its dependents
+      # never ran — treat it as a failure, otherwise the gate would go green
+      # on a broken run.
       - name: Check all jobs succeeded
         run: |
+          if [ "${{ needs.setup.result }}" = success ] && [ "${{ needs.setup.outputs.code }}" = false ]; then
+            echo "Docs-only change: every build and test job was skipped on purpose."
+            exit 0
+          fi
           results='${{ toJSON(needs.*.result) }}'
           echo "Job results: $results"
           if echo "$results" | grep -qE '"(failure|cancelled|skipped)"'; then

@@ -13,10 +13,21 @@ on:
       - '.github/workflows/performance.yml'
       - 'Cargo.*'
       - 'rust-toolchain.toml'
+  # Same engine paths as pull requests: a docs or wrapper change cannot move
+  # vector performance. Releases run this gate through release.yml
+  # (workflow_call) before publishing, so there is no `release` trigger.
   push:
     branches: [main]
-  release:
-    types: [published]
+    paths:
+      - 'packages/core/**'
+      - 'scripts/vector-bench-ci.py'
+      - 'scripts/bench-web/**'
+      - 'scripts/bench-web.mjs'
+      - 'scripts/vector-web-bench-compare.mjs'
+      - 'packages/bindings/web/**'
+      - '.github/workflows/performance.yml'
+      - 'Cargo.*'
+      - 'rust-toolchain.toml'
   schedule:
     - cron: '0 2 * * 1'
   workflow_dispatch:

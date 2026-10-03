@@ -1,8 +1,14 @@
 name: Deploy Docs
 
 on:
+  # The site is VitePress over docs/ alone; nothing outside it is included.
   push:
     branches: [main]
+    paths:
+      - 'docs/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/docs.yml'
   # Allow manual trigger from the Actions tab
   workflow_dispatch:
 

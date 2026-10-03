@@ -2,7 +2,7 @@ import { defineConfig, type HeadConfig } from "vitepress";
 
 const title = "TalaDB";
 const description =
-  "The embedded vector and document database for on-device AI. Store documents, run structured queries, and search vectors in one Rust database — across the browser, Node.js, and React Native. No cloud required.";
+  "The embedded vector and document database for on-device AI. Store documents, run structured queries, and search vectors in one Rust database — across the browser, Node.js, React Native, Android, and iOS. No cloud required.";
 const siteUrl = "https://taladb.dev";
 const ogImage = `${siteUrl}/tala-db-banner.png`;
 

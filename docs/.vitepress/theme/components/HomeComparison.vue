@@ -78,6 +78,7 @@ const rows = [
   { capability: 'Encryption at rest',               tala: '✓', indexed: '—',  sqlite: '~', dexie: '—',  cloud: '✓'  },
   { capability: 'Schema migrations',                tala: '✓', indexed: '—',  sqlite: '—', dexie: '✓',  cloud: '—'  },
   { capability: 'React Native (JSI)',               tala: '✓', indexed: '—',  sqlite: '✓', dexie: '—',  cloud: '—'  },
+  { capability: 'Native Kotlin & Swift packages',   tala: '✓', indexed: '—',  sqlite: '—', dexie: '—',  cloud: '—'  },
   { capability: 'Browser + OPFS persistence',       tala: '✓', indexed: '✓',  sqlite: '✓', dexie: '✓',  cloud: '—'  },
   { capability: 'No cloud / no API key',            tala: '✓', indexed: '✓',  sqlite: '✓', dexie: '✓',  cloud: '—'  },
   { capability: 'Rust core (no GC pauses)',         tala: '✓', indexed: '—',  sqlite: '~', dexie: '—',  cloud: '✓'  },

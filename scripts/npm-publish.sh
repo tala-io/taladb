@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Publish one npm package from the release workflow, then confirm the registry
+# Publish one npm package from the release workflow, then check the registry
 # serves it. A version already on npm is skipped, so a re-run of a partly
 # published release completes it; every other failure fails the release. The
 # old `pnpm publish || echo 'Already published'` hid an expired token: npm
@@ -23,14 +23,26 @@ tag=latest
 [[ "$version" == *-* ]] && tag=next
 
 # pnpm, not npm: only pnpm rewrites `workspace:*` dependencies on publish.
-(cd "$dir" && pnpm publish --no-git-checks --access public --tag "$tag")
+# Its exit status is the authority. A re-run can reach here while npm still
+# hides a version it accepted minutes ago; npm then refuses the duplicate, which
+# means the earlier publish worked.
+if ! output="$(cd "$dir" && pnpm publish --no-git-checks --access public --tag "$tag" 2>&1)"; then
+    echo "$output"
+    if grep -qE 'EPUBLISHCONFLICT|cannot publish over|previously published' <<<"$output"; then
+        echo "$name@$version was already published (npm has not served it yet); continuing."
+        exit 0
+    fi
+    exit 1
+fi
+echo "$output"
 
-for _ in $(seq 1 10); do
+# npm can take minutes to serve a large package ("being processed"), so the
+# read-back only warns; v0.12.0 stopped here after a 60 s wait for @taladb/node.
+for _ in $(seq 1 20); do
     if published; then
         echo "✓ $name@$version is on npm (dist-tag $tag)"
         exit 0
     fi
-    sleep 6
+    sleep 15
 done
-echo "::error::$name@$version was published but npm does not serve it after 60 s"
-exit 1
+echo "::warning::$name@$version was published, but npm did not serve it within 5 minutes; check it"
