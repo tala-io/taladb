@@ -6,12 +6,12 @@ Pod::Spec.new do |s|
   s.name          = "taladb-react-native"
   s.version       = package["version"]
   s.summary       = package["description"]
-  s.homepage      = "https://github.com/tala-io/taladb"
+  s.homepage      = "https://github.com/taladb/taladb"
   s.license       = package["license"]
   s.authors       = { "taladb" => "hello@thinkgrid.io" }
 
   s.platforms     = { :ios => "13.0" }
-  s.source        = { :git => "https://github.com/tala-io/taladb.git",
+  s.source        = { :git => "https://github.com/taladb/taladb.git",
                       :tag => "v#{s.version}" }
 
   # TypeScript / JS sources (not compiled by Xcode, just bundled)

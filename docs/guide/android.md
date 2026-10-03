@@ -15,7 +15,7 @@ rest, all on the device.
 The Kotlin package is new. Its API may still change before it is published,
 and it is **not on Maven Central yet**. To try it now, build it from source
 (see [below](#build-from-source)). Feedback and issues are welcome on
-[tala-io/taladb-kotlin](https://github.com/tala-io/taladb-kotlin).
+[taladb/taladb-kotlin](https://github.com/taladb/taladb-kotlin).
 :::
 
 ## Requirements
@@ -46,8 +46,8 @@ SDK with an NDK, Rust with `cargo-ndk`, and a checkout of this engine next to
 it:
 
 ```sh
-git clone https://github.com/tala-io/taladb
-git clone https://github.com/tala-io/taladb-kotlin
+git clone https://github.com/taladb/taladb
+git clone https://github.com/taladb/taladb-kotlin
 cd taladb-kotlin
 scripts/build-engine.sh ../taladb                       # builds the engine for every ABI
 ./gradlew :taladb:publishToMavenLocal                    # dev.taladb:taladb-android:0.1.0-SNAPSHOT
@@ -142,4 +142,4 @@ The package calls the engine's C FFI through a small JNI layer, and ships the
 engine's prebuilt Android libraries in the AAR. At open it checks that the
 library's C ABI version matches the one it was built for, so a mismatched
 engine fails with a clear error. Full API reference:
-[tala-io/taladb-kotlin](https://github.com/tala-io/taladb-kotlin).
+[taladb/taladb-kotlin](https://github.com/taladb/taladb-kotlin).

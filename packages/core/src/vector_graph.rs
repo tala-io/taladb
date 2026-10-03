@@ -806,6 +806,95 @@ impl<'a> CacheLease<'a> {
             .expect("the cache is only taken in Drop")
     }
 }
+impl CacheLease<'_> {
+    // The lease already reserves the active allowance. Deduct the query-owned
+    // bitmap before allocating it so graph nodes/scratch use only the remainder.
+    fn reserve_filter(&mut self, bytes: usize) -> Result<(), TalaDbError> {
+        let cache = self.cache_mut();
+        let limit = cache
+            .working_budget
+            .unwrap_or(0)
+            .checked_sub(bytes)
+            .ok_or(TalaDbError::SearchMemoryLimit)?;
+        cache.working_budget = Some(limit);
+        cache.budget = limit;
+        cache.scratch.trim(limit / 32);
+        cache.trim_nodes(limit.saturating_sub(cache.scratch.bytes()));
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum Eligibility<'a> {
+    All,
+    Ids(&'a HashSet<[u8; 16]>),
+    Mask(&'a [u64]),
+}
+impl Eligibility<'_> {
+    fn matches(self, ordinal: u64, doc: &[u8; 16]) -> bool {
+        match self {
+            Self::All => true,
+            Self::Ids(ids) => ids.contains(doc),
+            Self::Mask(bits) => usize::try_from(ordinal / 64)
+                .ok()
+                .and_then(|i| bits.get(i))
+                .is_some_and(|word| word & (1u64 << (ordinal % 64)) != 0),
+        }
+    }
+}
+pub(crate) struct FilterMask {
+    pub bits: Vec<u64>,
+    pub count: usize,
+}
+
+/// Stream document IDs into a compact ordinal bitmap. Duplicate emissions are
+/// harmless; IDs without a live graph mapping contribute no eligible node.
+pub(crate) fn filter_mask(
+    txn: &dyn ReadTxn,
+    h: &Header,
+    lease: &mut CacheLease<'_>,
+    visit: impl FnOnce(&mut dyn FnMut([u8; 16]) -> Result<(), TalaDbError>) -> Result<(), TalaDbError>,
+) -> Result<FilterMask, TalaDbError> {
+    let words = usize::try_from(h.next.div_ceil(64)).map_err(|_| TalaDbError::SearchMemoryLimit)?;
+    lease.reserve_filter(words.checked_mul(8).ok_or(TalaDbError::SearchMemoryLimit)?)?;
+    let mut mask = FilterMask {
+        bits: vec![0; words],
+        count: 0,
+    };
+    let mut keys = Vec::with_capacity(256);
+    let mut flush = |keys: &mut Vec<[u8; 17]>| -> Result<(), TalaDbError> {
+        crate::query::key_batch::visit(txn, &h.table, keys, &mut |_, bytes| {
+            let ordinal = u64::from_le_bytes(
+                bytes
+                    .try_into()
+                    .map_err(|_| invalid("invalid HNSW document mapping"))?,
+            );
+            if ordinal >= h.next {
+                return Err(invalid("invalid HNSW document mapping"));
+            }
+            let word = &mut mask.bits
+                [usize::try_from(ordinal / 64).map_err(|_| TalaDbError::SearchMemoryLimit)?];
+            let bit = 1u64 << (ordinal % 64);
+            if *word & bit == 0 {
+                *word |= bit;
+                mask.count += 1;
+            }
+            Ok(())
+        })
+    };
+    visit(&mut |id| {
+        keys.push(map_key(&id));
+        if keys.len() == 256 {
+            flush(&mut keys)?;
+        }
+        Ok(())
+    })?;
+    if !keys.is_empty() {
+        flush(&mut keys)?;
+    }
+    Ok(mask)
+}
+
 impl Drop for CacheLease<'_> {
     fn drop(&mut self) {
         let mut map = self
@@ -1012,7 +1101,7 @@ impl<'a> Reader<'a> {
         entries: &[u64],
         layer: usize,
         ef: usize,
-        allowed: Option<&HashSet<[u8; 16]>>,
+        allowed: Eligibility<'_>,
         live_only: bool,
     ) -> Result<Vec<Hit>, TalaDbError> {
         self.scratch.visited.clear();
@@ -1047,7 +1136,7 @@ impl<'a> Reader<'a> {
             self.visit(id)?;
             self.push_queue(hit)?;
             let n = self.node(id)?;
-            if (!live_only || !n.deleted) && allowed.is_none_or(|a| a.contains(&n.doc)) {
+            if (!live_only || !n.deleted) && allowed.matches(id, &n.doc) {
                 self.scratch.best.push(hit);
             }
         }
@@ -1068,7 +1157,7 @@ impl<'a> Reader<'a> {
                 {
                     self.push_queue(next)?;
                     let n = self.node(id)?;
-                    if (!live_only || !n.deleted) && allowed.is_none_or(|a| a.contains(&n.doc)) {
+                    if (!live_only || !n.deleted) && allowed.matches(id, &n.doc) {
                         self.scratch.best.push(next);
                         if self.scratch.best.len() > ef {
                             self.scratch.best.pop();
@@ -1239,7 +1328,7 @@ pub(crate) fn insert_cached(
                     &entries,
                     layer,
                     h.options.ef_construction as usize,
-                    None,
+                    Eligibility::All,
                     false,
                 )?;
                 // An empty result would leave the next layer with nowhere to
@@ -1332,7 +1421,7 @@ pub(crate) fn search(
     h: &Header,
     query: &[f32],
     ef: usize,
-    allowed: Option<&HashSet<[u8; 16]>>,
+    allowed: Eligibility<'_>,
     cache: &mut NodeCache,
 ) -> Result<(Vec<[u8; 16]>, usize), TalaDbError> {
     let Some(mut entry) = h.entry else {
@@ -1640,6 +1729,62 @@ mod cache_tests {
         ));
     }
     #[test]
+    fn streamed_filter_bitmap_deduplicates_mappings_and_charges_before_visiting() {
+        let db = crate::Database::open_in_memory().unwrap();
+        let h = Header {
+            next: 128,
+            ..Header::new(
+                "bitmap".into(),
+                0,
+                GraphOptions::default(),
+                2,
+                VectorMetric::Cosine,
+            )
+        };
+        let mut write = db.backend().begin_write().unwrap();
+        for ordinal in [0u64, 63, 64, 127] {
+            let id = ulid::Ulid::from(u128::from(ordinal)).to_bytes();
+            write
+                .put(&h.table, &map_key(&id), &ordinal.to_le_bytes())
+                .unwrap();
+        }
+        write.commit().unwrap();
+        let txn = db.backend().begin_read().unwrap();
+        let shared = new_shared_search_cache();
+        shared.lock().unwrap().set_budget(65536);
+        let mut lease = CacheLease::take(&shared, &h.table, 0);
+        let before = lease.cache_mut().working_budget.unwrap();
+        let mask = filter_mask(txn.as_ref(), &h, &mut lease, |accept| {
+            for ordinal in [0u128, 0, 63, 64, 127, 128] {
+                accept(ulid::Ulid::from(ordinal).to_bytes())?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(mask.count, 4);
+        assert_eq!(mask.bits, [1 | (1 << 63), 1 | (1 << 63)]);
+        assert_eq!(lease.cache_mut().working_budget, Some(before - 16));
+        assert!(!Eligibility::Mask(&mask.bits).matches(128, &[0; 16]));
+        let mut overlapping = CacheLease::take(&shared, &h.table, 0);
+        let result = filter_mask(txn.as_ref(), &h, &mut overlapping, |_| {
+            panic!("a second bitmap cannot allocate while the allowance is exhausted")
+        });
+        assert!(matches!(result, Err(TalaDbError::SearchMemoryLimit)));
+        drop(overlapping);
+        drop(mask);
+        drop(lease);
+        assert_eq!(shared.lock().unwrap().stats().active_bytes, 0);
+        let mut lease = CacheLease::take(&shared, &h.table, 0);
+        let huge = Header {
+            next: u64::MAX,
+            ..h
+        };
+        let result = filter_mask(txn.as_ref(), &huge, &mut lease, |_| {
+            panic!("an oversized bitmap must be rejected before visiting IDs")
+        });
+        assert!(matches!(result, Err(TalaDbError::SearchMemoryLimit)));
+    }
+    #[test]
     fn build_walks_do_not_allocate_from_historical_node_id_high_water() {
         let db = crate::Database::open_in_memory().unwrap();
         let txn = db.backend().begin_read().unwrap();
@@ -1659,7 +1804,14 @@ mod cache_tests {
         cache.insert_node(0, n, 2);
         let mut reader = Reader::new(txn.as_ref(), &h, &mut cache);
         let hits = reader
-            .layer(&Query::float(&[1.0, 0.0]), &[0], 0, 8, None, true)
+            .layer(
+                &Query::float(&[1.0, 0.0]),
+                &[0],
+                0,
+                8,
+                Eligibility::All,
+                true,
+            )
             .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(reader.scratch.visited.capacity(), 0);

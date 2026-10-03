@@ -4,6 +4,8 @@
  * writable snapshot. Requests are not automatically retried: a timeout can
  * mean the owner committed but its response was lost.
  */
+import { adaptiveConfigJson } from './cache-config.js';
+
 let wasmReady;
 function loadWasm() { return wasmReady ??= (async () => {
   const wasm = await import(/* @vite-ignore */ '../pkg/taladb_web.js');
@@ -182,6 +184,7 @@ async function executeOwned(op, args) {
 async function openOwner(passphrase) {
   WorkerDB = (await loadWasm()).WorkerDB;
   const durability = JSON.parse(activeConfigJson ?? '{}').durability ?? {};
+  const effectiveConfigJson = adaptiveConfigJson(activeConfigJson, navigator.deviceMemory);
   immediate = durability.flush_every_write !== false;
   flushMs = durability.flush_ms ?? 500;
   if (!Number.isFinite(flushMs) || flushMs < 0) throw new Error('durability.flush_ms must be a nonnegative finite number');
@@ -193,14 +196,14 @@ async function openOwner(passphrase) {
   if (syncHandle) {
     try {
       const salt = encrypted ? await loadOrCreateSalt(root, `taladb_${activeDbName}.redb.salt`) : null;
-      db = WorkerDB.openWithConfigAndOpfs(syncHandle, activeConfigJson, passphrase, salt);
+      db = WorkerDB.openWithConfigAndOpfs(syncHandle, effectiveConfigJson, passphrase, salt);
       backend = 'opfs';
     } catch (e) { syncHandle.close(); syncHandle = null; throw e; }
   } else {
     if (encrypted) throw new Error('TalaDB encryption requires OPFS; the IndexedDB fallback cannot encrypt at rest');
     const bytes = await idbLoadSnapshot(activeDbName);
     if (bytes && bytes.byteLength > MAX_SNAPSHOT_BYTES) throw new Error('TalaDB IndexedDB snapshot exceeds 32 MiB');
-    db = activeConfigJson ? WorkerDB.openWithConfigAndSnapshot(bytes, activeConfigJson) : WorkerDB.openWithSnapshot(bytes);
+    db = effectiveConfigJson ? WorkerDB.openWithConfigAndSnapshot(bytes, effectiveConfigJson) : WorkerDB.openWithSnapshot(bytes);
     backend = 'indexeddb';
   }
   db.setDurability(!immediate);

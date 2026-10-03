@@ -16,9 +16,9 @@ use crate::fts::{
     fts_stats_table_name, fts_table_name, token_frequencies, tokenize,
 };
 use crate::index::{
-    CompoundIndexDef, IndexDef, META_COMPOUND_TABLE, META_INDEXES_TABLE, compound_meta_key,
-    compound_table_name, docs_table_name, encode_compound_keys, encode_index_keys,
-    index_table_name, meta_key,
+    CompoundIndexDef, IndexDef, META_COMPOUND_TABLE, META_INDEX_ARRAYS_TABLE, META_INDEXES_TABLE,
+    adjust_index_arrays, compound_meta_key, compound_table_name, docs_table_name,
+    encode_compound_keys, encode_index_keys, index_table_name, meta_key,
 };
 use crate::query::executor::{execute, fetch_documents, index_ordered_entries};
 use crate::query::filter::Filter;
@@ -34,6 +34,15 @@ use crate::vector::{
 #[path = "vector_api.rs"]
 mod vector_api;
 pub use vector_api::*;
+#[path = "vector_window.rs"]
+mod vector_window;
+
+// Exact search streams anything larger than this: it reuses a decoded vector
+// block or batches reads, which beats building a set. ANN keeps a larger set,
+// scaled with the search budget (one ID per KiB, about 4% of it at HashSet's
+// worst-case footprint), because streaming it needs a doc-to-node lookup per match.
+const VECTOR_FILTER_MIN_IDS: usize = 256;
+const VECTOR_FILTER_BUDGET_BYTES_PER_ID: usize = 1024;
 
 const META_FTS_TABLE: &str = "meta::fts_indexes";
 
@@ -521,9 +530,11 @@ impl Collection {
         )?;
         let idx_table = index_table_name(&self.name, field);
         let mut keys: Vec<Vec<u8>> = Vec::with_capacity(existing.len());
+        let mut arrays = 0u64;
         for (_, doc_bytes) in existing {
             let doc: Document = postcard::from_bytes(&doc_bytes)?;
             if let Some(val) = doc.get(field) {
+                arrays += u64::from(matches!(val, Value::Array(_)));
                 keys.extend(encode_index_keys(val, doc.id));
             }
         }
@@ -532,6 +543,11 @@ impl Collection {
             .map(|k| crate::engine::KvOp::Put(k.as_slice(), &[]))
             .collect();
         wtxn.apply_batch(&idx_table, &ops)?;
+        wtxn.put(
+            META_INDEX_ARRAYS_TABLE,
+            meta_key.as_bytes(),
+            &arrays.to_le_bytes(),
+        )?;
 
         bump_revision(wtxn.as_mut(), &format!("schema::{}", self.name))?;
         wtxn.commit()?;
@@ -562,6 +578,7 @@ impl Collection {
 
         // Remove metadata
         wtxn.delete(META_INDEXES_TABLE, meta_key.as_bytes())?;
+        wtxn.delete(META_INDEX_ARRAYS_TABLE, meta_key.as_bytes())?;
         bump_revision(wtxn.as_mut(), &format!("schema::{}", self.name))?;
         wtxn.commit()?;
         self.invalidate_index_cache();
@@ -1313,6 +1330,71 @@ impl Collection {
         )
     }
 
+    // Memory pressure lowers the budget and with it this limit.
+    fn ann_filter_id_limit(&self) -> usize {
+        (self
+            .search_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .budget()
+            / VECTOR_FILTER_BUDGET_BYTES_PER_ID)
+            .max(VECTOR_FILTER_MIN_IDS)
+    }
+
+    // At most `limit` IDs are retained by any filter branch or union. Larger
+    // matches switch to a visitor (for ANN, a bitmap charged to the graph loan).
+    fn bounded_vector_ids_in(
+        &self,
+        txn: &dyn ReadTxn,
+        filter: &Filter,
+        limit: usize,
+    ) -> Result<Option<HashSet<[u8; 16]>>, TalaDbError> {
+        let cache = self.load_indexes_in(txn)?;
+        let plan = plan_full(
+            filter,
+            &cache.indexes,
+            &cache.fts_indexes,
+            &cache.compound_indexes,
+        );
+        crate::query::executor::matching_ids_limited(
+            &plan,
+            filter,
+            txn,
+            &self.name,
+            &cache.indexes,
+            &cache.compound_indexes,
+            limit,
+        )
+    }
+
+    fn visit_vector_ids_in(
+        &self,
+        txn: &dyn ReadTxn,
+        filter: &Filter,
+        accept: &mut dyn FnMut([u8; 16]) -> Result<(), TalaDbError>,
+    ) -> Result<(), TalaDbError> {
+        let cache = self.load_indexes_in(txn)?;
+        let plan = if cache.fts_indexes.is_empty() {
+            crate::query::QueryPlan::FullScan
+        } else {
+            plan_full(
+                filter,
+                &cache.indexes,
+                &cache.fts_indexes,
+                &cache.compound_indexes,
+            )
+        };
+        crate::query::executor::visit_matching_ids(
+            &plan,
+            filter,
+            txn,
+            &self.name,
+            &cache.indexes,
+            &cache.compound_indexes,
+            accept,
+        )
+    }
+
     fn find_nearest_in(
         &self,
         txn: &dyn ReadTxn,
@@ -1320,10 +1402,9 @@ impl Collection {
         query: &[f32],
         top_k: usize,
         pre_filter: Option<Filter>,
+        options: &VectorQueryOptions,
     ) -> Result<(Vec<VectorSearchResult>, usize), TalaDbError> {
-        use crate::vector::{Candidate, VectorBlock};
-        use std::cmp::Reverse;
-        use std::collections::BinaryHeap;
+        use crate::vector::VectorBlock;
         let cache = self.load_indexes_in(txn)?;
         let def = cache
             .vec_indexes
@@ -1354,35 +1435,68 @@ impl Collection {
         let cache_key = vec_meta_key(&self.name, field);
         let allowed = pre_filter
             .as_ref()
-            .map(|f| self.matching_ids_in(txn, f))
-            .transpose()?;
+            .map(|f| self.bounded_vector_ids_in(txn, f, VECTOR_FILTER_MIN_IDS))
+            .transpose()?
+            .flatten();
         if allowed.as_ref().is_some_and(HashSet::is_empty) {
             return Ok((vec![], 0));
         }
         let norm = crate::vector::l2_norm(query);
-        let mut best: BinaryHeap<Reverse<Candidate>> = BinaryHeap::new();
+        let mut ranker = vector_window::Ranker::new(top_k, options);
         let mut computations = 0;
-        let mut score = |id: Ulid, values: &[f32]| {
+        let mut score = |id: Ulid, values: &[f32]| -> Result<(), TalaDbError> {
             if values.len() != query.len() {
-                return;
+                return Ok(());
             }
             computations += 1;
             let similarity = crate::vector::score_with_query_norm(&def.metric, query, norm, values);
-            if !similarity.is_finite() {
-                return;
-            }
-            let candidate = Candidate(id, similarity);
-            if best.len() < top_k {
-                best.push(Reverse(candidate));
-            } else if best.peek().is_some_and(|worst| candidate > worst.0) {
-                best.pop();
-                best.push(Reverse(candidate));
-            }
+            ranker.offer(self, txn, id, similarity)
         };
         // Sparse filters batch point reads in key order. Dense filters use an
         // existing decoded block or one contiguous scan, decoding only matches.
         // Filtered reads never populate the full-vector cache.
-        if let Some(ids) = allowed {
+        if let Some(filter) = &pre_filter
+            && allowed.is_none()
+        {
+            let cached = self
+                .search_cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .vectors(&cache_key, generation);
+            if let Some(block) = cached {
+                // Blocks are built by ordered scans. Reuse their vectors without
+                // building an ID map or copying a collection-sized block.
+                self.visit_vector_ids_in(txn, filter, &mut |id| {
+                    let id = Ulid::from_bytes(id);
+                    if let Ok(i) = block.ids.binary_search(&id) {
+                        let start = i * block.dimensions;
+                        score(id, &block.values[start..start + block.dimensions])?;
+                    }
+                    Ok(())
+                })?;
+            } else {
+                let chunk_size = (64 * 1024 / def.dimensions.saturating_mul(4)).clamp(1, 256);
+                let mut keys = Vec::with_capacity(chunk_size);
+                let mut flush = |keys: &mut Vec<[u8; 16]>| -> Result<(), TalaDbError> {
+                    crate::query::key_batch::visit(txn, &table, keys, &mut |id, bytes| {
+                        if let Some(values) = decode_f32_vec(bytes) {
+                            score(Ulid::from_bytes(*id), &values)?;
+                        }
+                        Ok(())
+                    })
+                };
+                self.visit_vector_ids_in(txn, filter, &mut |id| {
+                    keys.push(id);
+                    if keys.len() == chunk_size {
+                        flush(&mut keys)?;
+                    }
+                    Ok(())
+                })?;
+                if !keys.is_empty() {
+                    flush(&mut keys)?;
+                }
+            }
+        } else if let Some(ids) = allowed {
             let count = usize::try_from(txn.count_entries(&table)?).unwrap_or(usize::MAX);
             if ids.len() <= count / 8 {
                 let mut keys: Vec<_> = ids.into_iter().collect();
@@ -1396,7 +1510,7 @@ impl Collection {
                         if let Some(bytes) = bytes
                             && let Some(values) = decode_f32_vec(&bytes)
                         {
-                            score(Ulid::from_bytes(*id), &values);
+                            score(Ulid::from_bytes(*id), &values)?;
                         }
                     }
                 }
@@ -1413,7 +1527,7 @@ impl Collection {
                         .zip(block.values.chunks_exact(block.dimensions))
                     {
                         if ids.contains(&id.to_bytes()) {
-                            score(*id, values);
+                            score(*id, values)?;
                         }
                     }
                 } else {
@@ -1426,7 +1540,7 @@ impl Collection {
                                 && ids.contains(&id)
                                 && let Some(values) = decode_f32_vec(bytes)
                             {
-                                score(Ulid::from_bytes(id), &values);
+                                score(Ulid::from_bytes(id), &values)?;
                             }
                             Ok(crate::engine::ScanFlow::Continue)
                         },
@@ -1451,7 +1565,7 @@ impl Collection {
                     .iter()
                     .zip(block.values.chunks_exact(block.dimensions))
                 {
-                    score(*id, values);
+                    score(*id, values)?;
                 }
             } else {
                 let count = usize::try_from(txn.count_entries(&table)?).unwrap_or(usize::MAX);
@@ -1488,7 +1602,7 @@ impl Collection {
                             && let Some(values) = decode_f32_vec(bytes)
                             && values.len() == def.dimensions
                         {
-                            score(Ulid::from_bytes(id), &values);
+                            score(Ulid::from_bytes(id), &values)?;
                             if retain {
                                 block.ids.push(Ulid::from_bytes(id));
                                 block.values.extend(values);
@@ -1507,9 +1621,7 @@ impl Collection {
                 }
             }
         }
-        let mut ranked: Vec<_> = best.into_iter().map(|r| r.0).collect();
-        ranked.sort_unstable_by(|a, b| b.cmp(a));
-        self.load_results_in(txn, ranked.into_iter().map(|c| (c.0, c.1)).collect())
+        self.load_results_in(txn, ranker.ranked())
             .map(|rows| (rows, computations))
     }
 
@@ -1668,6 +1780,8 @@ impl Collection {
 
         // --- secondary indexes ---
         for (idx, table) in cache.indexes.iter().zip(&tables.btree) {
+            let mut removed = 0u64;
+            let mut added = 0u64;
             let mut keys: Vec<(Vec<u8>, bool)> = Vec::new(); // (key, is_delete)
             for (doc, old_doc) in docs {
                 if unchanged(doc, old_doc.as_ref(), &idx.field) {
@@ -1676,6 +1790,7 @@ impl Collection {
                 if let Some(old) = old_doc
                     && let Some(old_val) = old.get(&idx.field)
                 {
+                    removed += u64::from(matches!(old_val, Value::Array(_)));
                     keys.extend(
                         encode_index_keys(old_val, old.id)
                             .into_iter()
@@ -1683,6 +1798,7 @@ impl Collection {
                     );
                 }
                 if let Some(new_val) = doc.get(&idx.field) {
+                    added += u64::from(matches!(new_val, Value::Array(_)));
                     keys.extend(
                         encode_index_keys(new_val, doc.id)
                             .into_iter()
@@ -1690,6 +1806,8 @@ impl Collection {
                     );
                 }
             }
+            // Count empty/unindexable arrays even when no key was produced.
+            adjust_index_arrays(wtxn, &self.name, &idx.field, removed, added)?;
             if keys.is_empty() {
                 continue;
             }
@@ -2570,6 +2688,11 @@ impl Collection {
         wtxn.apply_batch(&tables.docs, &body_ops)?;
 
         for (idx, table) in cache.indexes.iter().zip(&tables.btree) {
+            let removed = docs
+                .iter()
+                .filter(|d| matches!(d.get(&idx.field), Some(Value::Array(_))))
+                .count() as u64;
+            adjust_index_arrays(wtxn, &self.name, &idx.field, removed, 0)?;
             let keys: Vec<Vec<u8>> = docs
                 .iter()
                 .filter_map(|doc| {

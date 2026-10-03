@@ -8,7 +8,7 @@ use serde::{Deserialize, Deserializer};
 use std::collections::HashSet;
 use std::fmt;
 
-pub(super) fn fields(filter: &Filter) -> HashSet<&str> {
+pub(crate) fn fields(filter: &Filter) -> HashSet<&str> {
     fn visit<'a>(filter: &'a Filter, out: &mut HashSet<&'a str>) {
         match filter {
             Filter::All => {}
@@ -38,7 +38,7 @@ pub(super) fn fields(filter: &Filter) -> HashSet<&str> {
     out
 }
 
-pub(super) fn decode(bytes: &[u8], fields: &HashSet<&str>) -> Result<Document, postcard::Error> {
+pub(crate) fn decode(bytes: &[u8], fields: &HashSet<&str>) -> Result<Document, postcard::Error> {
     let mut de = postcard::Deserializer::from_bytes(bytes);
     DocumentSeed(fields).deserialize(&mut de)
 }

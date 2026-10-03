@@ -45,35 +45,81 @@ pub(crate) fn matching_ids(
     indexes: &[IndexDef],
     compounds: &[CompoundIndexDef],
 ) -> Result<HashSet<[u8; 16]>, TalaDbError> {
+    Ok(matching_ids_limited(
+        plan,
+        filter,
+        txn,
+        collection,
+        indexes,
+        compounds,
+        usize::MAX,
+    )?
+    .expect("an unlimited ID collection cannot request streaming"))
+}
+
+// None requests streaming. The limit applies to intermediate index branches,
+// unions and residual matches as well as the final eligible set.
+pub(crate) fn matching_ids_limited(
+    plan: &QueryPlan,
+    filter: &Filter,
+    txn: &dyn ReadTxn,
+    collection: &str,
+    indexes: &[IndexDef],
+    compounds: &[CompoundIndexDef],
+    limit: usize,
+) -> Result<Option<HashSet<[u8; 16]>>, TalaDbError> {
     let matcher = Matcher::new(filter)?;
-    let covered = match super::index_filter::resolve(filter, indexes, compounds, txn, collection)? {
-        Some(covered) if covered.exact => return Ok(covered.ids),
-        covered => covered,
-    };
+    let covered =
+        match super::index_filter::resolve(filter, indexes, compounds, txn, collection, limit) {
+            Ok(Some(covered)) if covered.exact => return Ok(Some(covered.ids)),
+            Ok(covered) => covered,
+            Err(super::index_filter::ResolveError::Limit) => return Ok(None),
+            Err(super::index_filter::ResolveError::Database(error)) => return Err(error),
+        };
     let mut ids = HashSet::new();
     let fields = super::filter_document::fields(filter);
     let table = docs_table_name(collection);
-    let mut accept = |bytes: &[u8]| -> Result<(), TalaDbError> {
+    let mut overflow = false;
+    let mut accept = |bytes: &[u8]| -> Result<bool, TalaDbError> {
         let doc = super::filter_document::decode(bytes, &fields)?;
         if matcher.matches(&doc)? {
+            if ids.len() >= limit && !ids.contains(&doc.id.to_bytes()) {
+                overflow = true;
+                return Ok(false);
+            }
             ids.insert(doc.id.to_bytes());
         }
-        Ok(())
+        Ok(true)
     };
     if let Some(covered) = covered {
         for id in covered.ids {
-            if let Some(bytes) = txn.get(&table, &id)? {
-                accept(&bytes)?;
+            if let Some(bytes) = txn.get(&table, &id)?
+                && !accept(&bytes)?
+            {
+                break;
             }
         }
+    } else if let QueryPlan::ById { ids } = plan {
+        for id in ids {
+            if let Some(bytes) = txn.get(&table, &id.to_bytes())?
+                && !accept(&bytes)?
+            {
+                break;
+            }
+        }
+    } else if limit != usize::MAX {
+        visit_plan_documents(plan, txn, collection, &mut accept)?;
     } else if matches!(plan, QueryPlan::FullScan) {
         txn.scan(
             &table,
             Bound::Unbounded,
             Bound::Unbounded,
             &mut |_, bytes| {
-                accept(bytes)?;
-                Ok(crate::engine::ScanFlow::Continue)
+                Ok(if accept(bytes)? {
+                    ScanFlow::Continue
+                } else {
+                    ScanFlow::Stop
+                })
             },
         )?;
     } else {
@@ -83,7 +129,7 @@ pub(crate) fn matching_ids(
             }
         }
     }
-    Ok(ids)
+    Ok((!overflow).then_some(ids))
 }
 
 /// [`execute`] that stops as soon as `limit` **matching** documents have been
@@ -390,7 +436,7 @@ pub fn execute_limited(
 
 /// A filter with its per-query work (regex compilation, query tokenization)
 /// hoisted out of the per-document loop.
-enum Matcher<'a> {
+pub(crate) enum Matcher<'a> {
     /// `Contains` with the query tokenized once, as a set for O(1) probes.
     Contains {
         field: &'a str,
@@ -403,7 +449,7 @@ enum Matcher<'a> {
 }
 
 impl<'a> Matcher<'a> {
-    fn new(filter: &'a Filter) -> Result<Self, TalaDbError> {
+    pub(crate) fn new(filter: &'a Filter) -> Result<Self, TalaDbError> {
         if let Filter::Contains(field, query) = filter {
             return Ok(Matcher::Contains {
                 field,
@@ -424,7 +470,7 @@ impl<'a> Matcher<'a> {
     /// already compiled every pattern, so this cannot fail for a matcher built
     /// from the same filter — but swallowing it here is what turned a bad regex
     /// under `$not` into "match everything".
-    fn matches(&self, doc: &Document) -> Result<bool, TalaDbError> {
+    pub(crate) fn matches(&self, doc: &Document) -> Result<bool, TalaDbError> {
         match self {
             Matcher::Contains { field, tokens } => {
                 if tokens.is_empty() {
@@ -773,4 +819,231 @@ pub(crate) fn fetch_by_ulids(
         }
     }
     Ok(docs)
+}
+
+/// Emit unique matches without collecting their IDs. Covered scalar plans use
+/// index keys; arrays, partial coverage and negation stream one projected body
+/// at a time, preserving full document predicate semantics and deduplication.
+pub(crate) fn visit_matching_ids(
+    plan: &QueryPlan,
+    filter: &Filter,
+    txn: &dyn ReadTxn,
+    collection: &str,
+    indexes: &[IndexDef],
+    compounds: &[CompoundIndexDef],
+    accept: &mut dyn FnMut([u8; 16]) -> Result<(), TalaDbError>,
+) -> Result<(), TalaDbError> {
+    let matcher = Matcher::new(filter)?;
+    if super::index_filter::visit_unique(filter, indexes, compounds, txn, collection, accept)? {
+        return Ok(());
+    }
+    let fields = super::filter_document::fields(filter);
+    let mut accept_doc = |bytes: &[u8]| -> Result<bool, TalaDbError> {
+        let doc = super::filter_document::decode(bytes, &fields)?;
+        if matcher.matches(&doc)? {
+            accept(doc.id.to_bytes())?;
+        }
+        Ok(true)
+    };
+    if let QueryPlan::FtsSearch { field, tokens } = plan {
+        return visit_fts_documents(txn, collection, field, tokens, &mut accept_doc).map(|_| ());
+    }
+    let table = docs_table_name(collection);
+    // A positive AND child is a superset of the final matches. Preserve its
+    // index narrowing while checking residual fields, without an unbounded set.
+    let mut accept_id = |id: [u8; 16]| -> Result<(), TalaDbError> {
+        if let Some(bytes) = txn.get(&table, &id)? {
+            accept_doc(&bytes)?;
+        }
+        Ok(())
+    };
+    if visit_index_seed(filter, indexes, compounds, txn, collection, &mut accept_id)? {
+        return Ok(());
+    }
+    txn.scan(
+        &table,
+        Bound::Unbounded,
+        Bound::Unbounded,
+        &mut |_, bytes| {
+            accept_doc(bytes)?;
+            Ok(ScanFlow::Continue)
+        },
+    )
+}
+
+fn visit_index_seed(
+    filter: &Filter,
+    indexes: &[IndexDef],
+    compounds: &[CompoundIndexDef],
+    txn: &dyn ReadTxn,
+    collection: &str,
+    accept: &mut dyn FnMut([u8; 16]) -> Result<(), TalaDbError>,
+) -> Result<bool, TalaDbError> {
+    if let Filter::And(children) = filter {
+        for child in children {
+            if super::index_filter::visit_unique(
+                child, indexes, compounds, txn, collection, accept,
+            )? || visit_index_seed(child, indexes, compounds, txn, collection, accept)?
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+// Preserve indexed source plans for capped collection, including mixed OR
+// branches. The capped collector deduplicates IDs and checks the whole filter.
+fn visit_plan_documents(
+    plan: &QueryPlan,
+    txn: &dyn ReadTxn,
+    collection: &str,
+    accept: &mut impl FnMut(&[u8]) -> Result<bool, TalaDbError>,
+) -> Result<bool, TalaDbError> {
+    match plan {
+        QueryPlan::FtsSearch { field, tokens } => {
+            visit_fts_documents(txn, collection, field, tokens, accept)
+        }
+        QueryPlan::ById { ids } => {
+            let table = docs_table_name(collection);
+            for id in ids {
+                if let Some(bytes) = txn.get(&table, &id.to_bytes())?
+                    && !accept(&bytes)?
+                {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        QueryPlan::IndexOr { plans } => {
+            for plan in plans {
+                if !visit_plan_documents(plan, txn, collection, accept)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        QueryPlan::IndexAnd { plans } if !plans.is_empty() => {
+            visit_plan_documents(&plans[0], txn, collection, accept)
+        }
+        _ => {
+            let docs = docs_table_name(collection);
+            let mut scan = |table: &str, start: Bound<&[u8]>, end: Bound<&[u8]>, indexed: bool| {
+                let mut more = true;
+                txn.scan(table, start, end, &mut |key, value| {
+                    let bytes = if indexed {
+                        ulid_from_index_key(key)
+                            .map(|id| txn.get(&docs, &id.to_bytes()))
+                            .transpose()?
+                            .flatten()
+                    } else {
+                        None
+                    };
+                    if !indexed {
+                        more = accept(value)?;
+                    } else if let Some(bytes) = bytes {
+                        more = accept(&bytes)?;
+                    }
+                    Ok(if more {
+                        ScanFlow::Continue
+                    } else {
+                        ScanFlow::Stop
+                    })
+                })?;
+                Ok(more)
+            };
+            match plan {
+                QueryPlan::IndexEq { field, start, end } => scan(
+                    &index_table_name(collection, field),
+                    Bound::Included(start),
+                    Bound::Included(end),
+                    true,
+                ),
+                QueryPlan::IndexRange { field, start, end } => scan(
+                    &index_table_name(collection, field),
+                    start.as_ref().map(Vec::as_slice),
+                    end.as_ref().map(Vec::as_slice),
+                    true,
+                ),
+                QueryPlan::IndexIn { field, ranges } => {
+                    let table = index_table_name(collection, field);
+                    for (start, end) in ranges {
+                        if !scan(&table, Bound::Included(start), Bound::Included(end), true)? {
+                            return Ok(false);
+                        }
+                    }
+                    Ok(true)
+                }
+                QueryPlan::CompoundIndexEq { fields, start, end } => {
+                    let table = crate::index::compound_table_name(
+                        collection,
+                        &fields.iter().map(String::as_str).collect::<Vec<_>>(),
+                    );
+                    scan(&table, Bound::Included(start), Bound::Included(end), true)
+                }
+                _ => scan(&docs, Bound::Unbounded, Bound::Unbounded, false),
+            }
+        }
+    }
+}
+
+// Posting lists are unique per token and document. Bounded previews choose a
+// short token list; projected document checks enforce every remaining predicate.
+fn visit_fts_documents(
+    txn: &dyn ReadTxn,
+    collection: &str,
+    field: &str,
+    tokens: &[String],
+    accept: &mut impl FnMut(&[u8]) -> Result<bool, TalaDbError>,
+) -> Result<bool, TalaDbError> {
+    let Some(mut seed) = tokens.first() else {
+        return Ok(true);
+    };
+    let table = fts_table_name(collection, field);
+    if tokens.len() > 1 {
+        let mut smallest = usize::MAX;
+        for token in tokens {
+            let (start, end) = fts_token_range(token);
+            let mut count = 0;
+            txn.scan(
+                &table,
+                Bound::Included(&start),
+                Bound::Included(&end),
+                &mut |_, _| {
+                    count += 1;
+                    Ok(if count >= 64 {
+                        ScanFlow::Stop
+                    } else {
+                        ScanFlow::Continue
+                    })
+                },
+            )?;
+            if count == 0 {
+                return Ok(true);
+            }
+            if count < smallest {
+                smallest = count;
+                seed = token;
+            }
+        }
+    }
+    let (start, end) = fts_token_range(seed);
+    let docs = docs_table_name(collection);
+    let mut more = true;
+    txn.scan(
+        &table,
+        Bound::Included(&start),
+        Bound::Included(&end),
+        &mut |key, _| {
+            if let Some(id) = ulid_from_fts_key(key)
+                && let Some(bytes) = txn.get(&docs, &id.to_bytes())?
+                && !accept(&bytes)?
+            {
+                more = false;
+                return Ok(ScanFlow::Stop);
+            }
+            Ok(ScanFlow::Continue)
+        },
+    )?;
+    Ok(more)
 }

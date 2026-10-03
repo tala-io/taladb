@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 160" width="620" height="160">
+  <rect x="10" y="10" width="140" height="140" rx="32" fill="#12151A"/>
+  <g transform="translate(10,10) scale(1.4)">
+    <g transform="translate(12 12) scale(0.76)">
+      <g fill="none" stroke="#3157D9" stroke-width="6">
+        <ellipse cx="44" cy="32" rx="26" ry="9"/>
+        <path d="M18 32 V76 C18 81.5 29.6 86 44 86 C58.4 86 70 81.5 70 76 V32"/>
+      </g>
+      <path d="M70 8 C74.4 23.6 74.4 23.6 90 28 C74.4 32.4 74.4 32.4 70 48 C65.6 32.4 65.6 32.4 50 28 C65.6 23.6 65.6 23.6 70 8Z" fill="#5B7BDE" stroke="#12151A" stroke-width="8" stroke-linejoin="round" paint-order="stroke"/>
+    </g>
+  </g>
+  <text x="185" y="118" font-family="'Avenir Next','Century Gothic','Segoe UI',sans-serif" font-size="118" font-weight="800" letter-spacing="-2">
+    <tspan fill="#F0EEE8">Tala</tspan><tspan fill="#7C9AF5">DB</tspan>
+  </text>
+</svg>

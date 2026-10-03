@@ -6,11 +6,11 @@
 Store documents, metadata, and vectors together. Query structured data and semantic similarity from one embedded database — across the browser, Node.js, React Native, and native Android (Kotlin) and iOS/macOS (Swift) apps. No cloud required.
 
 [![npm](https://img.shields.io/npm/v/taladb?label=npm)](https://www.npmjs.com/package/taladb)
-[![Status: Stable](https://img.shields.io/badge/Status-Stable-green)](https://github.com/tala-io/taladb)
+[![Status: Stable](https://img.shields.io/badge/Status-Stable-green)](https://github.com/taladb/taladb)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT_OR_Apache--2.0-blue.svg)](#license)
 [![Rust](https://img.shields.io/badge/Rust-2024_Edition-orange?logo=rust)](https://www.rust-lang.org)
 [![WASM](https://img.shields.io/badge/WASM-wasm--bindgen-purple?logo=webassembly)](https://rustwasm.github.io/wasm-bindgen/)
-[![Platform](https://img.shields.io/badge/Platform-Browser%20%7C%20Node.js%20%7C%20React%20Native%20%7C%20Android%20%7C%20iOS-green)](https://github.com/tala-io/taladb)
+[![Platform](https://img.shields.io/badge/Platform-Browser%20%7C%20Node.js%20%7C%20React%20Native%20%7C%20Android%20%7C%20iOS-green)](https://github.com/taladb/taladb)
 [![Sponsor](https://img.shields.io/badge/Sponsor-taladb-red?logo=github-sponsors)](https://github.com/sponsors/tala-sh)
 
 **[Documentation](https://taladb.dev) · [Web Demo](https://taladb-playground.vercel.app/) · [React Native Demo](https://play.google.com/store/apps/details?id=dev.thinkgrid.kepta) · [Android Demo](#) · [iOS Demo](#)**<br/>
@@ -46,8 +46,8 @@ The same Rust core powers every platform:
 | Browser | `@taladb/web` | `wasm-bindgen` + OPFS via DedicatedWorker | Stable |
 | Node.js | `@taladb/node` | `napi-rs` native module | Stable |
 | React Native | `@taladb/react-native` | JSI HostObject (C FFI via `cbindgen`) | Stable |
-| Android (Kotlin) | [`taladb-kotlin`](https://github.com/tala-io/taladb-kotlin) · `dev.taladb:taladb-android` | JNI over the C FFI · [guide](https://taladb.dev/guide/android) | Early release |
-| iOS & macOS (Swift) | [`taladb-swift`](https://github.com/tala-io/taladb-swift) | SwiftPM over the C FFI · [guide](https://taladb.dev/guide/swift) | Early release |
+| Android (Kotlin) | [`taladb-kotlin`](https://github.com/taladb/taladb-kotlin) · `dev.taladb:taladb-android` | JNI over the C FFI · [guide](https://taladb.dev/guide/android) | Early release |
+| iOS & macOS (Swift) | [`taladb-swift`](https://github.com/taladb/taladb-swift) | SwiftPM over the C FFI · [guide](https://taladb.dev/guide/swift) | Early release |
 | Rust | [`taladb`](https://crates.io/crates/taladb) | The engine crate itself · [guide](https://taladb.dev/guide/rust) | Early release |
 
 On the web, Node.js, and React Native, application code uses the unified `taladb` package with a single TypeScript API. Kotlin, Swift, and Rust apps get idiomatic native APIs over the same engine, with the same JSON filters, vector and full-text search, and live queries.

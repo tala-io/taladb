@@ -10,7 +10,7 @@ const median = values => {
 export function aggregate(samples) {
   if (!samples.length) throw new Error('no browser samples')
   const signature = report => JSON.stringify([report.ua, report.config, report.capabilities.storage,
-    report.cases.map(row => [row.filter, row.efSearch, row.recallAtK, row.fingerprint, row.distances, row.memoryFallbacks])])
+    report.cases.map(row => [row.filter, row.mode, row.efSearch, row.recallAtK, row.fingerprint, row.distances, row.memoryFallbacks])])
   if (samples.some(report => signature(report) !== signature(samples[0]))) throw new Error('browser workload results changed between repeated runs')
   const report = structuredClone(samples[0])
   for (const key of ['insertMs', 'buildMs']) report[key] = median(samples.map(s => s[key]))
@@ -38,8 +38,8 @@ export function compare(before, after) {
   if (before.cases.length !== after.cases.length) return [...failures, 'workload cases changed']
   for (let i = 0; i < before.cases.length; i++) {
     const old = before.cases[i], row = after.cases[i]
-    const label = `${row.filter} ef=${row.efSearch}`
-    if (row.filter !== old.filter || row.efSearch !== old.efSearch) { failures.push('workload cases changed'); continue }
+    const label = `${row.filter} ${row.mode ?? "ann"} ef=${row.efSearch}`
+    if (row.filter !== old.filter || row.mode !== old.mode || row.efSearch !== old.efSearch) { failures.push('workload cases changed'); continue }
     if (row.cacheStats && (row.cacheStats.activeBytes !== 0 || row.cacheStats.peakBytes > row.cacheStats.memoryBudgetBytes || row.cacheStats.retainedBytes > row.cacheStats.budgetBytes)) failures.push(`${label}: search memory exceeded allowance or leaked`)
     if (row.recallAtK + 0.03 < old.recallAtK) failures.push(`${label}: recall fell by more than 3 percentage points`)
     if (row.p50Ms > Math.max(old.p50Ms * 1.5, old.p50Ms + 0.5)) failures.push(`${label}: warm median latency regressed by more than 50% and 0.5 ms`)
@@ -55,10 +55,10 @@ async function main() {
   const failures = compare(before, after)
   await writeFile(output, JSON.stringify({ schema: 1, baseline: before, candidate: after, failures }, null, 2) + '\n')
   const lines = [`Browser worker + OPFS: ${after.config.count} vectors × ${after.config.dimensions} dimensions, ${after.config.cacheBytes} cache bytes, median of ${after.samples.length} runs`,
-    '', '| Filter / efSearch | Warm p50 ms before/after | Burst p95 ms before/after | Recall before/after | Peak reserved / limit bytes | Memory fallbacks |', '|---|---:|---:|---:|---:|---:|']
+    '', '| Filter / mode / efSearch | Warm p50 ms before/after | Burst p95 ms before/after | Recall before/after | Peak reserved / limit bytes | Memory fallbacks |', '|---|---:|---:|---:|---:|---:|']
   for (let i = 0; i < Math.min(before.cases.length, after.cases.length); i++) {
     const a = before.cases[i], b = after.cases[i]
-    lines.push(`| ${b.filter} / ${b.efSearch} | ${a.p50Ms.toFixed(3)} / ${b.p50Ms.toFixed(3)} | ${a.burst?.p95Ms.toFixed(3) ?? 'unavailable'} / ${b.burst?.p95Ms.toFixed(3) ?? 'unavailable'} | ${(a.recallAtK * 100).toFixed(1)}% / ${(b.recallAtK * 100).toFixed(1)}% | ${b.cacheStats ? `${b.cacheStats.peakBytes} / ${b.cacheStats.memoryBudgetBytes}` : 'unavailable'} | ${(b.memoryFallbacks ?? 0) + (b.burst?.memoryFallbacks ?? 0)} |`)
+    lines.push(`| ${b.filter} / ${b.mode ?? "ann"} / ${b.efSearch} | ${a.p50Ms.toFixed(3)} / ${b.p50Ms.toFixed(3)} | ${a.burst?.p95Ms.toFixed(3) ?? 'unavailable'} / ${b.burst?.p95Ms.toFixed(3) ?? 'unavailable'} | ${(a.recallAtK * 100).toFixed(1)}% / ${(b.recallAtK * 100).toFixed(1)}% | ${b.cacheStats ? `${b.cacheStats.peakBytes} / ${b.cacheStats.memoryBudgetBytes}` : 'unavailable'} | ${(b.memoryFallbacks ?? 0) + (b.burst?.memoryFallbacks ?? 0)} |`)
   }
   lines.push('', `Origin memory bytes before/after: ${before.originMemoryAfterBytes ?? 'unavailable'} / ${after.originMemoryAfterBytes ?? 'unavailable'}`,
     ...failures.map(message => `FAIL: ${message}`))

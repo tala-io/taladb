@@ -13,17 +13,32 @@ use taladb::{
 #[derive(Default)]
 struct Counts {
     documents: AtomicUsize,
+    index_keys: AtomicUsize,
+    index_points: AtomicUsize,
     vector_points: AtomicUsize,
     vector_scans: AtomicUsize,
+    graph_maps: AtomicUsize,
     on_index_scan: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 impl Counts {
     fn reset(&self) {
         self.documents.store(0, Ordering::SeqCst);
+        self.index_keys.store(0, Ordering::SeqCst);
+        self.index_points.store(0, Ordering::SeqCst);
         self.vector_points.store(0, Ordering::SeqCst);
         self.vector_scans.store(0, Ordering::SeqCst);
+        self.graph_maps.store(0, Ordering::SeqCst);
+    }
+    // Document-to-node mappings: a streamed filter bitmap reads one per match.
+    fn graph_map(&self, table: &str, key: &[u8]) {
+        if table.starts_with("hnsw::") && key.len() == 17 && key[0] == 2 {
+            self.graph_maps.fetch_add(1, Ordering::SeqCst);
+        }
     }
     fn reads(&self, table: &str, n: usize) {
+        if table.starts_with("idx::") || table.starts_with("cidx::") {
+            self.index_points.fetch_add(n, Ordering::SeqCst);
+        }
         if table.starts_with("docs::") {
             self.documents.fetch_add(n, Ordering::SeqCst);
         }
@@ -58,6 +73,9 @@ impl ReadTxn for Reader<'_> {
     }
     fn get_many(&self, t: &str, keys: &[&[u8]]) -> Result<Vec<Option<Vec<u8>>>, TalaDbError> {
         self.counts.reads(t, keys.len());
+        for key in keys {
+            self.counts.graph_map(t, key);
+        }
         self.inner.get_many(t, keys)
     }
     fn range(&self, t: &str, s: Bound<&[u8]>, e: Bound<&[u8]>) -> Result<KvPairs, TalaDbError> {
@@ -89,9 +107,13 @@ impl ReadTxn for Reader<'_> {
             self.counts.vector_scans.fetch_add(1, Ordering::SeqCst);
         }
         self.inner.scan(t, s, e, &mut |k, v| {
+            if t.starts_with("idx::") || t.starts_with("cidx::") {
+                self.counts.index_keys.fetch_add(1, Ordering::SeqCst);
+            }
             if t.starts_with("docs::") {
                 self.counts.documents.fetch_add(1, Ordering::SeqCst);
             }
+            self.counts.graph_map(t, k);
             f(k, v)
         })
     }
@@ -478,4 +500,672 @@ fn covered_keys_vectors_and_output_share_the_read_snapshot() {
         .hits
         .is_empty()
     );
+}
+
+#[test]
+fn selective_intersections_probe_broad_equality_without_loading_bodies() {
+    let (db, counts) = database();
+    let col = db.collection("docs").unwrap();
+    col.insert_many(
+        (0..512)
+            .map(|i| {
+                vec![
+                    (
+                        "wide".into(),
+                        Value::Array(vec![Value::Str("all".into()), Value::Str("all".into())]),
+                    ),
+                    ("x".into(), Value::Int(i)),
+                    (
+                        "v".into(),
+                        Value::Array(vec![Value::Float(1.0), Value::Float(i as f64 + 1.0)]),
+                    ),
+                    ("body".into(), Value::Bytes(vec![42; 8192])),
+                ]
+            })
+            .collect(),
+    )
+    .unwrap();
+    for f in ["wide", "x"] {
+        col.create_index(f).unwrap();
+    }
+    col.create_vector_index("v", 2, None, None).unwrap();
+    for wide in [
+        Filter::Eq("wide".into(), Value::Str("all".into())),
+        Filter::In(
+            "wide".into(),
+            vec![Value::Str("all".into()), Value::Str("absent".into())],
+        ),
+    ] {
+        for reverse in [false, true] {
+            let mut filters = vec![wide.clone(), Filter::Eq("x".into(), Value::Int(511))];
+            if reverse {
+                filters.reverse();
+            }
+            counts.reset();
+            let result = col
+                .search_vectors(
+                    "v",
+                    &[1.0, 1.0],
+                    10,
+                    Some(Filter::And(filters)),
+                    &options(VectorSearchMode::Exact),
+                )
+                .unwrap();
+            assert_eq!(result.hits.len(), 1);
+            assert_eq!(result.hits[0].document.get("x"), Some(&Value::Int(511)));
+            assert_eq!(counts.index_keys.load(Ordering::SeqCst), 65);
+            assert!(counts.index_points.load(Ordering::SeqCst) <= 2);
+            assert_eq!(counts.documents.load(Ordering::SeqCst), 1);
+        }
+    }
+}
+
+fn bounds(lo: Value, hi: Value) -> Filter {
+    Filter::And(vec![
+        Filter::Gte("x".into(), lo),
+        Filter::Lte("x".into(), hi),
+    ])
+}
+
+#[test]
+fn scalar_range_narrowing_tracks_array_backfills_writes_deletes_and_legacy_metadata() {
+    let (db, counts) = database();
+    let col = db.collection("docs").unwrap();
+    let ids = col
+        .insert_many(
+            (0..512)
+                .map(|i| {
+                    vec![
+                        ("x".into(), Value::Int(i)),
+                        (
+                            "v".into(),
+                            Value::Array(vec![Value::Float(1.0), Value::Float(i as f64 + 1.0)]),
+                        ),
+                    ]
+                })
+                .collect(),
+        )
+        .unwrap();
+    col.create_index("x").unwrap();
+    col.create_vector_index("v", 2, None, None).unwrap();
+    let search = |f| {
+        col.search_vectors(
+            "v",
+            &[1.0, 1.0],
+            1000,
+            Some(f),
+            &options(VectorSearchMode::Exact),
+        )
+        .unwrap()
+        .hits
+    };
+    counts.reset();
+    assert_eq!(search(bounds(Value::Int(250), Value::Int(253))).len(), 4);
+    assert_eq!(counts.index_keys.load(Ordering::SeqCst), 4);
+    let id = Filter::Eq("_id".into(), Value::Str(ids[0].to_string()));
+    let crossing = Value::Array(vec![Value::Int(-10), Value::Int(600)]);
+    col.update_one(
+        id.clone(),
+        Update::Set(vec![("x".into(), crossing.clone())]),
+    )
+    .unwrap();
+    assert_eq!(search(bounds(Value::Int(550), Value::Int(-5))).len(), 1);
+    // Rebuild must backfill the array count, too.
+    col.drop_index("x").unwrap();
+    col.create_index("x").unwrap();
+    assert_eq!(search(bounds(Value::Int(550), Value::Int(-5))).len(), 1);
+    col.update_one(id.clone(), Update::Set(vec![("x".into(), Value::Int(0))]))
+        .unwrap();
+    counts.reset();
+    assert_eq!(search(bounds(Value::Int(250), Value::Int(253))).len(), 4);
+    assert_eq!(counts.index_keys.load(Ordering::SeqCst), 4);
+    let added = col
+        .insert(vec![
+            ("x".into(), crossing.clone()),
+            (
+                "v".into(),
+                Value::Array(vec![Value::Float(1.0), Value::Float(1.0)]),
+            ),
+        ])
+        .unwrap();
+    assert_eq!(search(bounds(Value::Int(550), Value::Int(-5))).len(), 1);
+    col.delete_one(Filter::Eq("_id".into(), Value::Str(added.to_string())))
+        .unwrap();
+    counts.reset();
+    assert_eq!(search(bounds(Value::Int(250), Value::Int(253))).len(), 4);
+    assert_eq!(counts.index_keys.load(Ordering::SeqCst), 4);
+    // Absent/corrupt metadata must not be reconstructed from only new writes.
+    for bytes in [None, Some(vec![0, 0])] {
+        let mut txn = db.backend().begin_write().unwrap();
+        if let Some(bytes) = bytes {
+            txn.put("meta::index_arrays", b"docs::x", &bytes).unwrap();
+        } else {
+            txn.delete("meta::index_arrays", b"docs::x").unwrap();
+        }
+        txn.commit().unwrap();
+        col.update_one(
+            id.clone(),
+            Update::Set(vec![("x".into(), crossing.clone())]),
+        )
+        .unwrap();
+        assert_eq!(search(bounds(Value::Int(550), Value::Int(-5))).len(), 1);
+        col.update_one(id.clone(), Update::Set(vec![("x".into(), Value::Int(0))]))
+            .unwrap();
+    }
+    // An empty array contributes no index keys but still affects metadata.
+    col.update_one(
+        id.clone(),
+        Update::Set(vec![("x".into(), Value::Array(vec![]))]),
+    )
+    .unwrap();
+    col.drop_index("x").unwrap();
+    col.create_index("x").unwrap();
+    let txn = db.backend().begin_read().unwrap();
+    assert_eq!(
+        txn.get("meta::index_arrays", b"docs::x").unwrap(),
+        Some(1u64.to_le_bytes().to_vec())
+    );
+    drop(txn);
+    col.update_one(id, Update::Unset(vec!["x".into()])).unwrap();
+    counts.reset();
+    assert_eq!(search(bounds(Value::Int(250), Value::Int(253))).len(), 4);
+    assert_eq!(counts.index_keys.load(Ordering::SeqCst), 4);
+}
+
+#[test]
+fn narrowed_scalar_bounds_match_document_semantics_for_numeric_extremes() {
+    let (db, _) = database();
+    let col = db.collection("docs").unwrap();
+    let values = vec![
+        Value::Int(i64::MIN),
+        Value::Int(i64::MAX),
+        Value::Int(9_007_199_254_740_993),
+        Value::Int(-10),
+        Value::Int(0),
+        Value::Int(20),
+        Value::Float(-0.0),
+        Value::Float(0.0),
+        Value::Float(9_007_199_254_740_992.0),
+        Value::Float(-10.5),
+        Value::Float(20.5),
+        Value::Float(f64::INFINITY),
+        Value::Float(f64::NEG_INFINITY),
+        Value::Float(f64::NAN),
+        Value::Null,
+        Value::Bool(false),
+        Value::Str("a\0b".into()),
+        Value::Str("z".into()),
+    ];
+    col.insert_many(
+        values
+            .iter()
+            .map(|x| {
+                vec![
+                    ("x".into(), x.clone()),
+                    (
+                        "v".into(),
+                        Value::Array(vec![Value::Float(1.0), Value::Float(1.0)]),
+                    ),
+                ]
+            })
+            .collect(),
+    )
+    .unwrap();
+    col.create_index("x").unwrap();
+    col.create_vector_index("v", 2, None, None).unwrap();
+    let docs = col.find(Filter::All).unwrap();
+    for lo in &values {
+        for hi in &values {
+            for inclusive in [true, false] {
+                for upper_inclusive in [true, false] {
+                    let f = Filter::And(vec![
+                        if inclusive {
+                            Filter::Gte("x".into(), lo.clone())
+                        } else {
+                            Filter::Gt("x".into(), lo.clone())
+                        },
+                        if upper_inclusive {
+                            Filter::Lte("x".into(), hi.clone())
+                        } else {
+                            Filter::Lt("x".into(), hi.clone())
+                        },
+                        Filter::Gte("x".into(), lo.clone()), // repeated bounds must remain safe
+                    ]);
+                    let expected: HashSet<_> = docs
+                        .iter()
+                        .filter(|d| f.matches(d).unwrap())
+                        .map(|d| d.id)
+                        .collect();
+                    let got: HashSet<_> = col
+                        .search_vectors(
+                            "v",
+                            &[1.0, 1.0],
+                            100,
+                            Some(f.clone()),
+                            &options(VectorSearchMode::Exact),
+                        )
+                        .unwrap()
+                        .hits
+                        .into_iter()
+                        .map(|h| h.document.id)
+                        .collect();
+                    assert_eq!(got, expected, "filter {f:?}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn array_metadata_is_atomic_persistent_and_rebuilt_from_documents() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("filters.redb");
+    {
+        let db = Database::open(&path).unwrap();
+        let col = db.collection("docs").unwrap();
+        col.insert(vec![
+            ("x".into(), Value::Int(1)),
+            ("y".into(), Value::Array(vec![Value::Int(2)])),
+        ])
+        .unwrap();
+        col.create_index("x").unwrap();
+        col.create_compound_index(&["x", "y"]).unwrap();
+        // Compound indexes reject two array fields, after secondary maintenance
+        // has already run. Dropping the failed transaction must undo its count.
+        assert!(
+            col.update_many(
+                Filter::All,
+                Update::Set(vec![("x".into(), Value::Array(vec![Value::Int(1)]))])
+            )
+            .is_err()
+        );
+        let txn = db.backend().begin_read().unwrap();
+        assert_eq!(
+            txn.get("meta::index_arrays", b"docs::x").unwrap(),
+            Some(0u64.to_le_bytes().to_vec())
+        );
+    }
+    let db = Database::open(&path).unwrap();
+    let col = db.collection("docs").unwrap();
+    assert_eq!(
+        col.find_one(Filter::All).unwrap().unwrap().get("x"),
+        Some(&Value::Int(1))
+    );
+    col.drop_compound_index(&["x", "y"]).unwrap();
+    col.update_many(
+        Filter::All,
+        Update::Set(vec![("x".into(), Value::Array(vec![]))]),
+    )
+    .unwrap();
+    // Rebuilding old secondary indexes must derive counts, not trust metadata.
+    let mut txn = db.backend().begin_write().unwrap();
+    txn.delete("meta::index_arrays", b"docs::x").unwrap();
+    taladb::migration::rebuild_secondary_indexes(txn.as_mut()).unwrap();
+    txn.commit().unwrap();
+    {
+        let txn = db.backend().begin_read().unwrap();
+        assert_eq!(
+            txn.get("meta::index_arrays", b"docs::x").unwrap(),
+            Some(1u64.to_le_bytes().to_vec())
+        );
+    }
+    col.delete_many(Filter::All).unwrap();
+    let txn = db.backend().begin_read().unwrap();
+    assert_eq!(
+        txn.get("meta::index_arrays", b"docs::x").unwrap(),
+        Some(0u64.to_le_bytes().to_vec())
+    );
+}
+
+#[test]
+fn streamed_dense_filter_bitmap_and_group_keys_use_the_original_snapshot() {
+    for mode in [VectorSearchMode::Exact, VectorSearchMode::Ann] {
+        let (db, counts) = database();
+        let col = db.collection("docs").unwrap();
+        let ids = col
+            .insert_many(
+                (0..1500)
+                    .map(|i| {
+                        vec![
+                            ("active".into(), Value::Bool(true)),
+                            ("parent".into(), Value::Int(i)),
+                            (
+                                "v".into(),
+                                Value::Array(vec![Value::Float(i as f64), Value::Float(1.0)]),
+                            ),
+                        ]
+                    })
+                    .collect(),
+            )
+            .unwrap();
+        col.create_index("active").unwrap();
+        col.create_vector_index_with_options(
+            "v",
+            2,
+            Some(taladb::VectorMetric::Euclidean),
+            Some(GraphOptions {
+                m: 4,
+                ef_construction: 16,
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+        let first = ids[0];
+        let writer = db.collection("docs").unwrap();
+        *counts.on_index_scan.lock().unwrap() = Some(Box::new(move || {
+            writer
+                .update_one(
+                    Filter::Eq("_id".into(), Value::Str(first.to_string())),
+                    Update::Set(vec![
+                        ("active".into(), Value::Bool(false)),
+                        ("parent".into(), Value::Int(-1)),
+                        (
+                            "v".into(),
+                            Value::Array(vec![Value::Float(9999.0), Value::Float(1.0)]),
+                        ),
+                    ]),
+                )
+                .unwrap();
+        }));
+        let result = col
+            .search_vectors(
+                "v",
+                &[0.0, 1.0],
+                10,
+                Some(Filter::Eq("active".into(), Value::Bool(true))),
+                &VectorQueryOptions {
+                    mode,
+                    ef_search: Some(1500),
+                    group_by: Some("parent".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(result.hits[0].document.id, first);
+        assert_eq!(result.hits[0].score, 1.0);
+        assert_eq!(result.hits[0].document.get("parent"), Some(&Value::Int(0)));
+        assert_eq!(
+            result.hits[0].document.get("active"),
+            Some(&Value::Bool(true))
+        );
+        assert_eq!(
+            col.find_one(Filter::Eq("_id".into(), Value::Str(first.to_string())))
+                .unwrap()
+                .unwrap()
+                .get("parent"),
+            Some(&Value::Int(-1))
+        );
+        assert_eq!(db.vector_cache_stats().active_bytes, 0);
+    }
+}
+
+#[test]
+fn broad_nested_predicates_keep_the_small_and_seed() {
+    let (db, counts) = database();
+    let col = db.collection("docs").unwrap();
+    col.insert_many(
+        (0..1500)
+            .map(|i| {
+                vec![
+                    ("bucket".into(), Value::Int(i % 100)),
+                    (
+                        "tags".into(),
+                        Value::Array(vec![Value::Int(i), Value::Int(i + 1500)]),
+                    ),
+                    (
+                        "v".into(),
+                        Value::Array(vec![Value::Float(i as f64), Value::Float(1.0)]),
+                    ),
+                ]
+            })
+            .collect(),
+    )
+    .unwrap();
+    col.create_index("bucket").unwrap();
+    col.create_index("tags").unwrap();
+    col.create_vector_index_with_options(
+        "v",
+        2,
+        Some(taladb::VectorMetric::Euclidean),
+        Some(GraphOptions {
+            m: 4,
+            ef_construction: 16,
+            ..Default::default()
+        }),
+    )
+    .unwrap();
+    for nested in [
+        Filter::And(vec![
+            Filter::Gte("tags".into(), Value::Int(1500)),
+            Filter::Lt("tags".into(), Value::Int(1500)),
+        ]),
+        Filter::Or(vec![
+            Filter::Gte("tags".into(), Value::Int(1500)),
+            Filter::Lt("tags".into(), Value::Int(1500)),
+        ]),
+    ] {
+        let filter = Filter::And(vec![nested, Filter::Eq("bucket".into(), Value::Int(0))]);
+        let expected = col
+            .search_vectors(
+                "v",
+                &[0.0, 1.0],
+                5,
+                Some(filter.clone()),
+                &options(VectorSearchMode::Exact),
+            )
+            .unwrap();
+        for mode in [VectorSearchMode::Exact, VectorSearchMode::Ann] {
+            counts.reset();
+            let result = col
+                .search_vectors(
+                    "v",
+                    &[0.0, 1.0],
+                    5,
+                    Some(filter.clone()),
+                    &VectorQueryOptions {
+                        mode,
+                        ef_search: Some(1500),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            assert_eq!(
+                result
+                    .hits
+                    .iter()
+                    .map(|h| (h.document.id, h.score.to_bits()))
+                    .collect::<Vec<_>>(),
+                expected
+                    .hits
+                    .iter()
+                    .map(|h| (h.document.id, h.score.to_bits()))
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(result.hits.len(), 5);
+            assert!(
+                result
+                    .hits
+                    .iter()
+                    .all(|h| filter.matches(&h.document).unwrap())
+            );
+            assert!(
+                counts.documents.load(Ordering::SeqCst) <= 25,
+                "the residual must read only the 15 selected candidates and the page"
+            );
+            assert!(
+                counts.index_keys.load(Ordering::SeqCst) <= 600,
+                "nested branches must remain capped"
+            );
+        }
+    }
+}
+
+#[test]
+fn text_postings_and_partial_indexes_narrow_streamed_residual_reads() {
+    let (db, counts) = database();
+    db.set_vector_cache_budget(1024 * 1024);
+    let col = db.collection("docs").unwrap();
+    col.insert_many(
+        (0..2000)
+            .map(|i| {
+                vec![
+                    ("tenant".into(), Value::Int(i / 300)),
+                    (
+                        "text".into(),
+                        Value::Str(
+                            if i == 0 {
+                                "common rare selected"
+                            } else if i < 300 {
+                                "common selected"
+                            } else {
+                                "common ordinary"
+                            }
+                            .into(),
+                        ),
+                    ),
+                    ("body".into(), Value::Bytes(vec![42; 4096])),
+                    (
+                        "v".into(),
+                        Value::Array(vec![Value::Float(i as f64), Value::Float(1.0)]),
+                    ),
+                ]
+            })
+            .collect(),
+    )
+    .unwrap();
+    col.create_index("tenant").unwrap();
+    col.create_fts_index("text").unwrap();
+    col.create_vector_index_with_options(
+        "v",
+        2,
+        Some(taladb::VectorMetric::Euclidean),
+        Some(GraphOptions {
+            m: 4,
+            ef_construction: 16,
+            ..Default::default()
+        }),
+    )
+    .unwrap();
+    for (filter, expected, max_reads) in [
+        (
+            Filter::Or(vec![
+                Filter::Contains("text".into(), "common rare".into()),
+                Filter::Contains("text".into(), "common rare".into()),
+            ]),
+            1,
+            3,
+        ),
+        (Filter::Contains("text".into(), "common rare".into()), 1, 2),
+        (Filter::Contains("text".into(), "selected".into()), 5, 600),
+        (
+            Filter::And(vec![
+                Filter::Eq("tenant".into(), Value::Int(0)),
+                Filter::Exists("body".into(), true),
+            ]),
+            5,
+            320,
+        ),
+    ] {
+        for mode in [VectorSearchMode::Exact, VectorSearchMode::Ann] {
+            counts.reset();
+            let result = col
+                .search_vectors(
+                    "v",
+                    &[0.0, 1.0],
+                    5,
+                    Some(filter.clone()),
+                    &VectorQueryOptions {
+                        mode,
+                        ef_search: Some(2000),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            assert_eq!(result.hits.len(), expected);
+            assert_eq!(result.hits[0].score, 1.0);
+            assert!(
+                result
+                    .hits
+                    .iter()
+                    .all(|h| filter.matches(&h.document).unwrap())
+            );
+            assert!(
+                counts.documents.load(Ordering::SeqCst) <= max_reads,
+                "indexed predicates must not scan the collection: {filter:?}"
+            );
+            assert_eq!(db.vector_cache_stats().active_bytes, 0);
+        }
+    }
+}
+
+#[test]
+fn moderate_filters_keep_the_id_set_until_the_budget_is_too_small() {
+    let (db, counts) = database();
+    let col = db.collection("docs").unwrap();
+    col.insert_many(
+        (0..1500)
+            .map(|i| {
+                vec![
+                    ("half".into(), Value::Int(i % 2)),
+                    (
+                        "v".into(),
+                        Value::Array(vec![Value::Float(i as f64), Value::Float(1.0)]),
+                    ),
+                ]
+            })
+            .collect(),
+    )
+    .unwrap();
+    col.create_index("half").unwrap();
+    col.create_vector_index_with_options(
+        "v",
+        2,
+        Some(taladb::VectorMetric::Euclidean),
+        Some(GraphOptions {
+            m: 4,
+            ef_construction: 16,
+            ..Default::default()
+        }),
+    )
+    .unwrap();
+    let filter = Filter::Eq("half".into(), Value::Int(0));
+    let search = |mode| {
+        col.search_vectors(
+            "v",
+            &[0.0, 1.0],
+            5,
+            Some(filter.clone()),
+            &VectorQueryOptions {
+                mode,
+                ef_search: Some(1500),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .hits
+        .iter()
+        .map(|h| (h.document.id, h.score.to_bits()))
+        .collect::<Vec<_>>()
+    };
+    let expected = search(VectorSearchMode::Exact);
+    // 750 matches: 1 MiB allows 1,024 retained IDs, 256 KiB only 256. Memory
+    // pressure lowers the budget the same way.
+    for (budget, streamed) in [
+        (1024 * 1024, false),
+        (256 * 1024, true),
+        (1024 * 1024, false),
+    ] {
+        db.set_vector_cache_budget(budget);
+        counts.reset();
+        assert_eq!(search(VectorSearchMode::Ann), expected);
+        let maps = counts.graph_maps.load(Ordering::SeqCst);
+        if streamed {
+            assert!(
+                maps >= 750,
+                "a streamed bitmap maps every match, read {maps}"
+            );
+        } else {
+            assert_eq!(maps, 0, "a retained ID set needs no node mappings");
+        }
+    }
 }

@@ -28,7 +28,7 @@ cargo add serde_json
 Until a release reaches crates.io, depend on the repository instead:
 
 ```toml
-taladb = { git = "https://github.com/tala-io/taladb" }
+taladb = { git = "https://github.com/taladb/taladb" }
 ```
 
 Requires Rust 1.90 or newer.

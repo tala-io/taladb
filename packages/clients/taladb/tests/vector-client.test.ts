@@ -1,6 +1,30 @@
 import { expect, it, vi } from 'vitest';
 import { createVectorClient, vectorIndexRequest } from '../src/vector-client';
 
+it('forwards cache policy and pressure controls with validated byte values', async () => {
+  const send = vi.fn(async () => ({ budgetBytes: 1 }));
+  const client = createVectorClient(send);
+  await client.vectorCacheStats();
+  await client.setVectorCacheBudget(0);
+  await client.setVectorCacheAdaptive(8 * 1024 ** 3);
+  await client.setVectorCacheAdaptive();
+  await client.notifyMemoryPressure('critical');
+  await client.notifyMemoryPressure('normal');
+  expect(send.mock.calls.map(([r]) => r)).toEqual([
+    { op: 'cacheStats' }, { op: 'cacheBudget', bytes: 0 },
+    { op: 'cacheAdaptive', memoryBytes: 8 * 1024 ** 3 },
+    { op: 'cacheAdaptive', memoryBytes: undefined },
+    { op: 'memoryPressure', level: 'critical' }, { op: 'memoryPressure', level: 'normal' },
+  ]);
+  send.mockClear();
+  for (const bytes of [0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+    await expect(client.setVectorCacheAdaptive(bytes)).rejects.toThrow('memoryBytes');
+  }
+  await expect(client.setVectorCacheBudget(-1)).rejects.toThrow('bytes');
+  await expect(client.notifyMemoryPressure('typo' as never)).rejects.toThrow('pressure');
+  expect(send).not.toHaveBeenCalled();
+});
+
 it('cancels between batches without publishing or leaving a build running', async () => {
   const controller = new AbortController();
   const send = vi.fn(async (request: Record<string, unknown>) => {

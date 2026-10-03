@@ -63,10 +63,11 @@ async function main() {
   if (args.includes('--quick')) query.set('quick', '1')
   if (vectors) {
     const { settings } = await import('./bench-web/vector-workload.js')
-    for (const name of ['count', 'dims', 'queries', 'cache-bytes', 'quantization', 'concurrency']) {
+    for (const name of ['count', 'dims', 'queries', 'cache-bytes', 'memory-hint-bytes', 'quantization', 'concurrency']) {
       const value = option(`--${name}`, null)
       if (value !== null) query.set(name, value)
     }
+    if (args.includes('--pressure')) query.set('pressure', '1')
     settings(query.toString())
   }
   const requestedPort = Number(option('--port', '0'))
@@ -135,10 +136,10 @@ async function main() {
     const chromeVer = /Chrome\/([\d.]+)/.exec(ua)?.[1] ?? '?'
     console.log(`\nTalaDB browser bench · ${ua} · ${serve ? 'manual browser/device' : `Chrome ${chromeVer} (headless) · ${cpu} · ${platform()} ${arch()}`}\n`)
     if (vectors) {
-      console.log(`${report.config.count} vectors × ${report.config.dimensions} dimensions · ${report.config.cacheBytes} cache bytes · ${report.capabilities.storage}`)
-      console.log('| Filter | efSearch | First query ms | Warm p50/p95 ms | Recall@k |')
+      console.log(`${report.config.count} vectors × ${report.config.dimensions} dimensions · ${report.config.cacheBytes ?? 'adaptive'} cache bytes · ${report.capabilities.storage}`)
+      console.log('| Filter / mode | efSearch | First query ms | Warm p50/p95 ms | Recall@k |')
       console.log('|---|---:|---:|---:|---:|')
-      for (const row of report.cases) console.log(`| ${row.filter} | ${row.efSearch} | ${row.firstQueryMs.toFixed(3)} | ${row.p50Ms.toFixed(3)}/${row.p95Ms.toFixed(3)} | ${(row.recallAtK * 100).toFixed(1)}% |`)
+      for (const row of report.cases) console.log(`| ${row.filter} / ${row.mode} | ${row.efSearch} | ${row.firstQueryMs.toFixed(3)} | ${row.p50Ms.toFixed(3)}/${row.p95Ms.toFixed(3)} | ${(row.recallAtK * 100).toFixed(1)}% |`)
     } else {
       console.log(`OPFS ${opfs ? 'active' : 'UNAVAILABLE (in-memory fallback!)'}`)
       for (const r of rows) {

@@ -21,15 +21,24 @@ function fake(storage = 'opfs', fail = false, { fallback = false, noStats = fals
     worker = { terminate() { terminated++ } }
     async call(op, args) {
       calls.push({ op, args })
-      if (op === 'init') { opens++; this.cacheBytes = JSON.parse(args.configJson).vector_cache_bytes; return }
+      if (op === 'init') {
+        opens++
+        const config = JSON.parse(args.configJson)
+        this.baselineBytes = config.vector_cache_bytes ?? Math.max(1048576, Math.min(16777216, Math.floor((config.vector_cache_memory_bytes ?? 4 * 1024 ** 3) / 512)))
+        this.cacheBytes = this.baselineBytes
+        return
+      }
       if (op === 'close') { closes++; return }
       if (op === 'capabilities') return { storage }
       if (op === 'insertMany') { documents.push(...JSON.parse(args.docsJson)); return }
       if (op === 'createIndex') return
       const request = JSON.parse(args.requestJson)
-      if (request.op === 'cacheStats') {
+      if (request.op === 'memoryPressure') {
+        this.cacheBytes = request.level === 'critical' ? 0 : request.level === 'moderate' ? Math.floor(this.baselineBytes / 4) : this.baselineBytes
+      }
+      if (['cacheStats', 'memoryPressure'].includes(request.op)) {
         if (noStats) throw new Error('unknown op')
-        return { budgetBytes: this.cacheBytes, memoryBudgetBytes: Math.max(this.cacheBytes, 65536), retainedBytes: Math.min(this.cacheBytes, 2048), activeBytes: leak ? 1 : 0, peakBytes: Math.max(this.cacheBytes, 65536) }
+        return { budgetBytes: this.cacheBytes, baselineBudgetBytes: this.baselineBytes, memoryBudgetBytes: Math.max(this.cacheBytes, 65536), retainedBytes: Math.min(this.cacheBytes, 2048), activeBytes: leak ? 1 : 0, peakBytes: Math.max(this.cacheBytes, 65536) }
       }
       if (request.op === 'create') return
       if (request.op === 'beginBuild') { this.processed = 0; return { id: 'build' } }
@@ -38,7 +47,24 @@ function fake(storage = 'opfs', fail = false, { fallback = false, noStats = fals
         return { processed: this.processed, total: documents.length, state: this.processed === documents.length ? 'ready' : 'building' }
       }
       if (fail) throw new Error('search failed')
-      const matching = documents.filter(doc => Object.entries(request.filter ?? {}).every(([field, value]) => doc[field] === value))
+      const matches = (doc, filter) => Object.entries(filter ?? {}).every(([field, value]) => {
+        if (field === '$and') return value.every(child => matches(doc, child))
+        if (value && typeof value === 'object') return Object.entries(value).every(([op, bound]) => {
+          const values = Array.isArray(doc[field]) ? doc[field] : [doc[field]]
+          return values.some(v => op === '$gte' ? v >= bound : v < bound)
+        })
+        return doc[field] === value
+      })
+      let matching = documents.filter(doc => matches(doc, request.filter))
+      if (request.options.groupBy) {
+        const counts = new Map()
+        matching = matching.filter(doc => {
+          const key = doc[request.options.groupBy], count = counts.get(key) ?? 0
+          counts.set(key, count + 1)
+          return count < request.options.groupSize
+        })
+      }
+      matching = matching.slice(request.options.offset ?? 0)
       return { hits: matching.slice(0, request.topK).map(document => ({ document, score: 1 / (document.ordinal + 1) })),
         execution: { path: request.options.mode === 'ann' && !fallback ? 'hnsw' : 'exact', reason: request.options.mode === 'ann' && fallback ? 'memoryBudget' : 'indexReady', distanceComputations: matching.length } }
     }
@@ -51,15 +77,35 @@ test('worker workload uses configured cache, staged builds, persisted reopen and
   let time = 0
   const config = settings('count=100&dims=8&queries=3')
   const result = await runVectorBenchmark(config, { Client: f.Client, now: () => time++, memory: async () => 123 })
-  assert.equal(result.cases.length, 9)
+  assert.equal(result.cases.length, 36)
   assert.ok(result.cases.every(row => row.recallAtK === 1 && row.firstQueryMs > 0))
+  assert.equal(result.cases.filter(row => row.mode === 'exact').length, 9)
+  assert.ok(f.calls.some(c => c.op === 'vectorCommand' && JSON.parse(c.args.requestJson).options?.groupBy === 'tenant' && JSON.parse(c.args.requestJson).options?.offset === 2))
   assert.equal(result.buildStep.count, 4)
   assert.ok(result.cases.every(row => row.burst.requests === config.queries * config.concurrency && row.cacheStats.activeBytes === 0))
   assert.equal(result.originMemoryAfterBytes, 123)
-  assert.deepEqual(f.stats(), { opens: 10, closes: 10, terminated: 10 })
+  assert.deepEqual(f.stats(), { opens: 37, closes: 37, terminated: 37 })
+  for (const name of ['and-skew-1pct', 'scalar-window-1pct', 'array-cross-1pct']) {
+    assert.equal(result.cases.filter(row => row.filter === name).length, 4)
+  }
   assert.ok(f.calls.filter(c => c.op === 'init').every(c => JSON.parse(c.args.configJson).vector_cache_bytes === config.cacheBytes))
   const builds = f.calls.filter(c => c.op === 'vectorCommand').map(c => JSON.parse(c.args.requestJson)).filter(c => c.op === 'stepBuild')
   assert.ok(builds.every(c => c.batchSize === 32))
+})
+
+test('adaptive browser profiles verify pressure, zero retention and recovery budgets', async () => {
+  const f = fake()
+  const config = settings('count=100&dims=8&queries=2&cache-bytes=auto&memory-hint-bytes=2147483648&pressure=1')
+  const report = await runVectorBenchmark(config, { Client: f.Client, memory: async () => null })
+  assert.equal(config.cacheBytes, null)
+  assert.deepEqual(report.pressureCycle.map(row => row.level), ['normal', 'moderate', 'critical', 'normal'])
+  assert.deepEqual(report.pressureCycle.map(row => row.cacheStats.budgetBytes), [4194304, 1048576, 0, 4194304])
+  assert.equal(report.pressureCycle[2].cacheStats.retainedBytes, 0)
+  assert.ok(report.pressureCycle.every(row => row.recallAtK === 1 && row.cacheStats.activeBytes === 0))
+  const configJson = JSON.parse(f.calls.find(c => c.op === 'init').args.configJson)
+  assert.equal(configJson.vector_cache_bytes, undefined)
+  assert.equal(configJson.vector_cache_memory_bytes, 2147483648)
+  for (const invalid of ['pressure=yes', 'memory-hint-bytes=0', 'memory-hint-bytes=Infinity']) assert.throws(() => settings(invalid))
 })
 
 test('unavailable OPFS and failed queries reject and close their workers', async () => {
@@ -104,7 +150,7 @@ test('browser reports exact memory fallbacks and supports baseline bindings with
   const f = fake('opfs', false, { fallback: true, noStats: true })
   const config = settings('count=100&dims=8&queries=2&concurrency=3')
   const result = await runVectorBenchmark(config, { Client: f.Client, memory: async () => null })
-  assert.ok(result.cases.every(row => row.firstMemoryFallback && row.memoryFallbacks === 2 && row.burst.memoryFallbacks === 6 && row.cacheStats === null))
+  assert.ok(result.cases.filter(row => row.mode === 'ann').every(row => row.firstMemoryFallback && row.memoryFallbacks === 2 && row.burst.memoryFallbacks === 6 && row.cacheStats === null))
 })
 
 test('browser rejects leaked search reservations and releases its worker', async () => {

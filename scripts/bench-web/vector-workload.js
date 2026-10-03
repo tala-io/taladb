@@ -9,12 +9,15 @@ export function settings(search) {
   }
   const quantization = params.get('quantization') ?? 'binary'
   if (!['none', 'scalar', 'binary'].includes(quantization)) throw new Error('invalid quantization')
+  if (params.has('pressure') && !['0', '1'].includes(params.get('pressure'))) throw new Error('invalid pressure')
   return {
     count: integer('count', 2000, 100, 100000),
     dimensions: integer('dims', 128, 1, 4096),
     queries: integer('queries', 30, 1, 1000),
     concurrency: integer('concurrency', 4, 1, 16),
-    cacheBytes: integer('cache-bytes', 8 * 1024 * 1024, 0, 256 * 1024 * 1024),
+    cacheBytes: params.get('cache-bytes') === 'auto' ? null : integer('cache-bytes', 8 * 1024 * 1024, 0, 256 * 1024 * 1024),
+    memoryHintBytes: params.has('memory-hint-bytes') ? integer('memory-hint-bytes', null, 1, Number.MAX_SAFE_INTEGER) : null,
+    memoryPressure: params.get('pressure') === '1',
     quantization,
     m: 8, efConstruction: 64, batchSize: 32, topK: 10, seed: 42,
   }
@@ -32,7 +35,7 @@ export function dataset(config) {
   }
   const centers = Array.from({ length: 32 }, () => normalize(Array.from({ length: config.dimensions }, () => random() * 2 - 1)))
   const point = i => normalize(centers[i % centers.length].map(x => x + (random() * 2 - 1) * 0.2))
-  const documents = Array.from({ length: config.count }, (_, i) => ({ ordinal: i, tenant: i % 10, bucket: i % 100, v: point(i) }))
+  const documents = Array.from({ length: config.count }, (_, i) => ({ ordinal: i, tenant: i % 10, bucket: i % 100, active: i % 20 !== 19, tags: [i, i + config.count], v: point(i) }))
   seed = config.seed ^ 0x12345
   return {
     documents,
@@ -65,7 +68,10 @@ export async function runVectorBenchmark(config, {
 } = {}) {
   const { documents, probes } = dataset(config)
   const dbName = `vector-bench-${Date.now()}-${Math.random().toString(36).slice(2)}.db`
-  const configJson = JSON.stringify({ vector_cache_bytes: config.cacheBytes })
+  const configJson = JSON.stringify({
+    ...(config.cacheBytes !== null ? { vector_cache_bytes: config.cacheBytes } : {}),
+    ...(config.memoryHintBytes !== null ? { vector_cache_memory_bytes: config.memoryHintBytes } : {}),
+  })
   let client
   const decode = value => typeof value === 'string' ? JSON.parse(value) : value
   const command = request => client.call('vectorCommand', { collection: 'vectors', requestJson: JSON.stringify(request) }).then(decode)
@@ -84,8 +90,29 @@ export async function runVectorBenchmark(config, {
       if (globalThis.navigator?.locks?.request) await navigator.locks.request(`taladb:taladb_${dbName}.redb`, () => {})
     }
   }
-  const search = (query, filter, mode, efSearch) => command({ op: 'search', field: 'v', query, topK: config.topK, filter, options: { mode, efSearch } })
-  const filters = [{ name: 'all', value: null }, { name: 'tenant-10pct', value: { tenant: 0 } }, { name: 'bucket-1pct', value: { bucket: 0 } }]
+  const search = (query, filter, mode, efSearch) => command({ op: 'search', field: 'v', query, topK: config.topK, filter: filter.value, options: { ...filter.options, mode, efSearch } })
+  const windowStart = Math.floor(config.count / 2)
+  const filters = [
+    { name: 'all', value: null },
+    { name: 'dense-95pct', value: { active: true } },
+    { name: 'dense-grouped', value: { active: true }, options: { groupBy: 'tenant', groupSize: 2, offset: 2 } },
+    { name: 'many-groups', value: null, options: { groupBy: 'ordinal', groupSize: 1 } },
+    { name: 'tenant-10pct', value: { tenant: 0 } },
+    { name: 'bucket-1pct', value: { bucket: 0 } },
+    { name: 'and-skew-1pct', value: { $and: [{ tenant: 0 }, { bucket: 0 }] } },
+    { name: 'scalar-window-1pct', value: { ordinal: { $gte: windowStart, $lt: windowStart + Math.max(1, Math.floor(config.count / 100)) } } },
+    // Every tags array has one element on either side. Merging these bounds
+    // into a scalar range would silently exclude every eligible document.
+    { name: 'array-cross-1pct', value: { $and: [{ tags: { $gte: config.count, $lt: config.count } }, { bucket: 0 }] } },
+  ]
+  const matches = (doc, filter) => Object.entries(filter ?? {}).every(([field, value]) => {
+    if (field === '$and') return value.every(child => matches(doc, child))
+    if (value && typeof value === 'object') return Object.entries(value).every(([op, bound]) => {
+      const values = Array.isArray(doc[field]) ? doc[field] : [doc[field]]
+      return values.some(v => op === '$gte' ? v >= bound : v < bound)
+    })
+    return doc[field] === value
+  })
   const cases = []
   try {
     await open()
@@ -97,7 +124,7 @@ export async function runVectorBenchmark(config, {
     for (let i = 0; i < documents.length; i += 128) {
       await client.call('insertMany', { collection: 'vectors', docsJson: JSON.stringify(documents.slice(i, i + 128)) })
     }
-    for (const field of ['tenant', 'bucket']) await client.call('createIndex', { collection: 'vectors', field })
+    for (const field of ['tenant', 'bucket', 'ordinal', 'tags', 'active']) await client.call('createIndex', { collection: 'vectors', field })
     const insertMs = now() - insertStart
     const buildStart = now()
     await command({ op: 'create', field: 'v', dimensions: config.dimensions, options: { m: config.m, efConstruction: config.efConstruction, quantization: config.quantization }, deferBuild: true })
@@ -118,26 +145,57 @@ export async function runVectorBenchmark(config, {
     for (const filter of filters) {
       progress(`ground truth: ${filter.name}`)
       const truth = []
-      for (const query of probes) truth.push((await search(query, filter.value, 'exact', 100)).hits)
-      for (const efSearch of [64, 100, 200]) {
+      const validate = hits => {
+        const counts = new Map(), ordinals = new Set()
+        for (const hit of hits) {
+          const doc = hit.document
+          if (!matches(doc, filter.value) || ordinals.has(doc.ordinal)) throw new Error(`filter eligibility or duplicate result: ${filter.name}`)
+          ordinals.add(doc.ordinal)
+          if (filter.options?.groupBy) {
+            const key = doc[filter.options.groupBy], count = (counts.get(key) ?? 0) + 1
+            counts.set(key, count)
+            if (count > filter.options.groupSize) throw new Error(`group quota mismatch: ${filter.name}`)
+          }
+        }
+      }
+      const eligible = documents.filter(doc => matches(doc, filter.value))
+      const groups = new Map()
+      for (const doc of eligible) {
+        const key = doc[filter.options?.groupBy]
+        groups.set(key, (groups.get(key) ?? 0) + 1)
+      }
+      const available = filter.options?.groupBy
+        ? [...groups.values()].reduce((sum, count) => sum + Math.min(count, filter.options.groupSize), 0)
+        : eligible.length
+      const expectedCount = Math.min(config.topK, Math.max(0, available - (filter.options?.offset ?? 0)))
+      for (const query of probes) {
+        const hits = (await search(query, filter, 'exact', 100)).hits
+        validate(hits)
+        if (hits.length !== expectedCount) {
+          throw new Error(`exact filter eligibility mismatch: ${filter.name}`)
+        }
+        truth.push(hits)
+      }
+      for (const [mode, efSearch] of [['exact', 100], ['ann', 64], ['ann', 100], ['ann', 200]]) {
         await close()
         const reopenStart = now()
         await open()
         const reopenMs = now() - reopenStart
         const firstStart = now()
-        const first = await search(probes[0], filter.value, 'ann', efSearch)
+        const first = await search(probes[0], filter, mode, efSearch)
         const firstQueryMs = now() - firstStart
-        if (first.execution.path !== 'hnsw' && first.execution.reason !== 'memoryBudget') throw new Error('ANN was not used')
+        if (mode === 'ann' && first.execution.path !== 'hnsw' && first.execution.reason !== 'memoryBudget') throw new Error('ANN was not used')
         // Warm the fixed query sweep before measuring it.
-        for (const query of probes) await search(query, filter.value, 'ann', efSearch)
+        for (const query of probes) await search(query, filter, mode, efSearch)
         const times = []
         let recall = 0, distances = 0, fingerprint = 2166136261, memoryFallbacks = 0
         for (let i = 0; i < probes.length; i++) {
           const start = now()
-          const result = await search(probes[i], filter.value, 'ann', efSearch)
+          const result = await search(probes[i], filter, mode, efSearch)
           times.push(now() - start)
+          validate(result.hits)
           if (result.execution.reason === 'memoryBudget') memoryFallbacks++
-          else if (result.execution.path !== 'hnsw') throw new Error('ANN was not used')
+          else if (mode === 'ann' && result.execution.path !== 'hnsw') throw new Error('ANN was not used')
           distances += result.execution.distanceComputations
           const ids = new Set(truth[i].map(hit => hit.document.ordinal))
           recall += ids.size ? result.hits.filter(hit => ids.has(hit.document.ordinal)).length / ids.size : 1
@@ -153,25 +211,63 @@ export async function runVectorBenchmark(config, {
         for (let i = 0; i < probes.length; i++) {
           await Promise.all(Array.from({ length: config.concurrency }, async (_, j) => {
             const start = now()
-            const result = await search(probes[(i + j) % probes.length], filter.value, 'ann', efSearch)
+            const result = await search(probes[(i + j) % probes.length], filter, mode, efSearch)
             burstTimes.push(now() - start)
             if (result.execution.reason === 'memoryBudget') burstFallbacks++
-            else if (result.execution.path !== 'hnsw') throw new Error('ANN was not used')
+            else if (mode === 'ann' && result.execution.path !== 'hnsw') throw new Error('ANN was not used')
           }))
         }
         const stats = await cacheStats()
         if (stats && (stats.activeBytes !== 0 || stats.retainedBytes > stats.budgetBytes || stats.peakBytes > stats.memoryBudgetBytes)) {
           throw new Error('shared search memory accounting exceeded budget or leaked a reservation')
         }
-        cases.push({ filter: filter.name, efSearch, reopenMs, firstQueryMs, ...percentiles(times), recallAtK: recall / probes.length, distances, fingerprint,
+        cases.push({ filter: filter.name, mode, efSearch, reopenMs, firstQueryMs, ...percentiles(times), recallAtK: recall / probes.length, distances, fingerprint,
           firstMemoryFallback: first.execution.reason === 'memoryBudget', memoryFallbacks, cacheStats: stats,
           burst: { concurrency: config.concurrency, requests: burstTimes.length, ...percentiles(burstTimes), memoryFallbacks: burstFallbacks } })
-        progress(`${filter.name} ef=${efSearch}: ${cases.at(-1).p50Ms.toFixed(2)} ms`)
+        progress(`${filter.name} ${mode} ef=${efSearch}: ${cases.at(-1).p50Ms.toFixed(2)} ms`)
+      }
+    }
+    const pressureCycle = []
+    if (config.memoryPressure) {
+      const filter = filters[2] // dense grouped pagination, including bitmap eligibility
+      const truth = await Promise.all(probes.map(query => search(query, filter, 'exact', 200)))
+      let normalRecall = null
+      for (const level of ['normal', 'moderate', 'critical', 'normal']) {
+        const before = await command({ op: 'memoryPressure', level })
+        const target = level === 'normal' ? before.baselineBudgetBytes : level === 'moderate' ? Math.floor(before.baselineBudgetBytes / 4) : 0
+        if (before.budgetBytes !== target) throw new Error(`pressure budget mismatch: ${level}`)
+        let recall = 0, memoryFallbacks = 0
+        const times = []
+        for (let i = 0; i < probes.length; i++) {
+          const start = now(), result = await search(probes[i], filter, 'ann', 200)
+          times.push(now() - start)
+          const groups = new Map(), seen = new Set()
+          for (const hit of result.hits) {
+            const doc = hit.document, count = (groups.get(doc.tenant) ?? 0) + 1
+            if (!doc.active || seen.has(doc.ordinal) || count > filter.options.groupSize) throw new Error(`pressure filter/group mismatch: ${level}`)
+            seen.add(doc.ordinal); groups.set(doc.tenant, count)
+          }
+          if (result.hits.length !== truth[i].hits.length) throw new Error(`pressure result count mismatch: ${level}`)
+          const ids = new Set(truth[i].hits.map(hit => hit.document.ordinal))
+          recall += ids.size ? result.hits.filter(hit => ids.has(hit.document.ordinal)).length / ids.size : 1
+          if (result.execution.reason === 'memoryBudget') {
+            memoryFallbacks++
+            const ranked = hits => JSON.stringify(hits.map(hit => [hit.document.ordinal, hit.score]))
+            if (ranked(result.hits) !== ranked(truth[i].hits)) throw new Error(`pressure fallback differs from exact: ${level}`)
+          } else if (result.execution.path !== 'hnsw') throw new Error('pressure ANN was not used')
+        }
+        const stats = await command({ op: 'cacheStats' })
+        if (stats.activeBytes || stats.retainedBytes > target || stats.peakBytes > stats.memoryBudgetBytes) throw new Error(`pressure allowance leaked or exceeded: ${level}`)
+        const recallAtK = recall / probes.length
+        if (normalRecall === null) normalRecall = recallAtK
+        if (recallAtK + 0.03 < normalRecall) throw new Error(`pressure recall fell: ${level}`)
+        pressureCycle.push({ level, ...percentiles(times), recallAtK, memoryFallbacks, cacheStats: stats })
+        progress(`pressure ${level}: ${times.length} queries, ${memoryFallbacks} memory fallbacks`)
       }
     }
     const originMemoryAfterBytes = await memory()
-    return { schema: 1, workload: 'browser-vector', config, capabilities, insertMs, buildMs,
-      buildStep: { ...percentiles(steps), count: steps.length }, cases,
+    return { schema: 2, workload: 'browser-vector', config, capabilities, insertMs, buildMs,
+      buildStep: { ...percentiles(steps), count: steps.length }, cases, pressureCycle,
       originMemoryBeforeBytes, originMemoryAfterBytes }
   } finally {
     await close()

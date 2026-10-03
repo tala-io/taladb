@@ -7,5 +7,6 @@ pub use filter::Filter;
 pub use options::{FindOptions, SortDirection, SortSpec};
 pub use planner::{QueryPlan, plan};
 
-mod filter_document;
+pub(crate) mod filter_document;
 mod index_filter;
+pub(crate) mod key_batch;

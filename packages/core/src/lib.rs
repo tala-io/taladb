@@ -292,6 +292,27 @@ impl Database {
             .stats()
     }
 
+    /// Use a host memory hint (bytes), with a conservative per-database cap.
+    /// None restores the platform fallback. Reported pressure remains active
+    /// until the host explicitly reports recovery. Zero is not a valid hint.
+    pub fn set_vector_cache_adaptive(&self, memory_bytes: Option<u64>) -> Result<(), TalaDbError> {
+        self.search_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .set_adaptive(memory_bytes)
+    }
+
+    /// Reduce retention and new search admissions under host memory pressure.
+    /// Existing loans finish under their original allowance. Normal restores
+    /// the configured baseline; critical disables retention, keeping the shared
+    /// 64 KiB ANN workspace and same-snapshot exact fallback.
+    pub fn notify_memory_pressure(&self, pressure: MemoryPressure) {
+        self.search_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .notify_pressure(pressure);
+    }
+
     /// Access the raw storage backend.
     ///
     /// Useful for calling lower-level APIs such as [`read_audit_log`] and
@@ -690,7 +711,7 @@ pub use collection::{
     VectorBuildProgress, VectorExecution, VectorIndexStatus, VectorQueryOptions, VectorQueryResult,
     VectorSearchMode,
 };
-pub use search_cache::VectorCacheStats;
+pub use search_cache::{MemoryPressure, VectorCachePolicy, VectorCacheStats};
 pub use vector_graph::{GraphOptions, Quantization};
 
 // Compiles the README's examples as doctests, so the crates.io page cannot
