@@ -34,6 +34,11 @@ use crate::vector::{
 #[path = "vector_api.rs"]
 mod vector_api;
 pub use vector_api::*;
+#[path = "vector_window.rs"]
+mod vector_window;
+
+// Keep preparatory ID collections small before switching to streaming.
+const VECTOR_FILTER_ID_LIMIT: usize = 256;
 
 const META_FTS_TABLE: &str = "meta::fts_indexes";
 
@@ -1321,6 +1326,59 @@ impl Collection {
         )
     }
 
+    // At most this many IDs are retained by any filter branch or union. Large
+    // matches switch to a visitor; this limit is separate from the cache budget.
+    fn bounded_vector_ids_in(
+        &self,
+        txn: &dyn ReadTxn,
+        filter: &Filter,
+    ) -> Result<Option<HashSet<[u8; 16]>>, TalaDbError> {
+        let cache = self.load_indexes_in(txn)?;
+        let plan = plan_full(
+            filter,
+            &cache.indexes,
+            &cache.fts_indexes,
+            &cache.compound_indexes,
+        );
+        crate::query::executor::matching_ids_limited(
+            &plan,
+            filter,
+            txn,
+            &self.name,
+            &cache.indexes,
+            &cache.compound_indexes,
+            VECTOR_FILTER_ID_LIMIT,
+        )
+    }
+
+    fn visit_vector_ids_in(
+        &self,
+        txn: &dyn ReadTxn,
+        filter: &Filter,
+        accept: &mut dyn FnMut([u8; 16]) -> Result<(), TalaDbError>,
+    ) -> Result<(), TalaDbError> {
+        let cache = self.load_indexes_in(txn)?;
+        let plan = if cache.fts_indexes.is_empty() {
+            crate::query::QueryPlan::FullScan
+        } else {
+            plan_full(
+                filter,
+                &cache.indexes,
+                &cache.fts_indexes,
+                &cache.compound_indexes,
+            )
+        };
+        crate::query::executor::visit_matching_ids(
+            &plan,
+            filter,
+            txn,
+            &self.name,
+            &cache.indexes,
+            &cache.compound_indexes,
+            accept,
+        )
+    }
+
     fn find_nearest_in(
         &self,
         txn: &dyn ReadTxn,
@@ -1328,10 +1386,9 @@ impl Collection {
         query: &[f32],
         top_k: usize,
         pre_filter: Option<Filter>,
+        options: &VectorQueryOptions,
     ) -> Result<(Vec<VectorSearchResult>, usize), TalaDbError> {
-        use crate::vector::{Candidate, VectorBlock};
-        use std::cmp::Reverse;
-        use std::collections::BinaryHeap;
+        use crate::vector::VectorBlock;
         let cache = self.load_indexes_in(txn)?;
         let def = cache
             .vec_indexes
@@ -1362,35 +1419,68 @@ impl Collection {
         let cache_key = vec_meta_key(&self.name, field);
         let allowed = pre_filter
             .as_ref()
-            .map(|f| self.matching_ids_in(txn, f))
-            .transpose()?;
+            .map(|f| self.bounded_vector_ids_in(txn, f))
+            .transpose()?
+            .flatten();
         if allowed.as_ref().is_some_and(HashSet::is_empty) {
             return Ok((vec![], 0));
         }
         let norm = crate::vector::l2_norm(query);
-        let mut best: BinaryHeap<Reverse<Candidate>> = BinaryHeap::new();
+        let mut ranker = vector_window::Ranker::new(top_k, options);
         let mut computations = 0;
-        let mut score = |id: Ulid, values: &[f32]| {
+        let mut score = |id: Ulid, values: &[f32]| -> Result<(), TalaDbError> {
             if values.len() != query.len() {
-                return;
+                return Ok(());
             }
             computations += 1;
             let similarity = crate::vector::score_with_query_norm(&def.metric, query, norm, values);
-            if !similarity.is_finite() {
-                return;
-            }
-            let candidate = Candidate(id, similarity);
-            if best.len() < top_k {
-                best.push(Reverse(candidate));
-            } else if best.peek().is_some_and(|worst| candidate > worst.0) {
-                best.pop();
-                best.push(Reverse(candidate));
-            }
+            ranker.offer(self, txn, id, similarity)
         };
         // Sparse filters batch point reads in key order. Dense filters use an
         // existing decoded block or one contiguous scan, decoding only matches.
         // Filtered reads never populate the full-vector cache.
-        if let Some(ids) = allowed {
+        if let Some(filter) = &pre_filter
+            && allowed.is_none()
+        {
+            let cached = self
+                .search_cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .vectors(&cache_key, generation);
+            if let Some(block) = cached {
+                // Blocks are built by ordered scans. Reuse their vectors without
+                // building an ID map or copying a collection-sized block.
+                self.visit_vector_ids_in(txn, filter, &mut |id| {
+                    let id = Ulid::from_bytes(id);
+                    if let Ok(i) = block.ids.binary_search(&id) {
+                        let start = i * block.dimensions;
+                        score(id, &block.values[start..start + block.dimensions])?;
+                    }
+                    Ok(())
+                })?;
+            } else {
+                let chunk_size = (64 * 1024 / def.dimensions.saturating_mul(4)).clamp(1, 256);
+                let mut keys = Vec::with_capacity(chunk_size);
+                let mut flush = |keys: &mut Vec<[u8; 16]>| -> Result<(), TalaDbError> {
+                    crate::query::key_batch::visit(txn, &table, keys, &mut |id, bytes| {
+                        if let Some(values) = decode_f32_vec(bytes) {
+                            score(Ulid::from_bytes(*id), &values)?;
+                        }
+                        Ok(())
+                    })
+                };
+                self.visit_vector_ids_in(txn, filter, &mut |id| {
+                    keys.push(id);
+                    if keys.len() == chunk_size {
+                        flush(&mut keys)?;
+                    }
+                    Ok(())
+                })?;
+                if !keys.is_empty() {
+                    flush(&mut keys)?;
+                }
+            }
+        } else if let Some(ids) = allowed {
             let count = usize::try_from(txn.count_entries(&table)?).unwrap_or(usize::MAX);
             if ids.len() <= count / 8 {
                 let mut keys: Vec<_> = ids.into_iter().collect();
@@ -1404,7 +1494,7 @@ impl Collection {
                         if let Some(bytes) = bytes
                             && let Some(values) = decode_f32_vec(&bytes)
                         {
-                            score(Ulid::from_bytes(*id), &values);
+                            score(Ulid::from_bytes(*id), &values)?;
                         }
                     }
                 }
@@ -1421,7 +1511,7 @@ impl Collection {
                         .zip(block.values.chunks_exact(block.dimensions))
                     {
                         if ids.contains(&id.to_bytes()) {
-                            score(*id, values);
+                            score(*id, values)?;
                         }
                     }
                 } else {
@@ -1434,7 +1524,7 @@ impl Collection {
                                 && ids.contains(&id)
                                 && let Some(values) = decode_f32_vec(bytes)
                             {
-                                score(Ulid::from_bytes(id), &values);
+                                score(Ulid::from_bytes(id), &values)?;
                             }
                             Ok(crate::engine::ScanFlow::Continue)
                         },
@@ -1459,7 +1549,7 @@ impl Collection {
                     .iter()
                     .zip(block.values.chunks_exact(block.dimensions))
                 {
-                    score(*id, values);
+                    score(*id, values)?;
                 }
             } else {
                 let count = usize::try_from(txn.count_entries(&table)?).unwrap_or(usize::MAX);
@@ -1496,7 +1586,7 @@ impl Collection {
                             && let Some(values) = decode_f32_vec(bytes)
                             && values.len() == def.dimensions
                         {
-                            score(Ulid::from_bytes(id), &values);
+                            score(Ulid::from_bytes(id), &values)?;
                             if retain {
                                 block.ids.push(Ulid::from_bytes(id));
                                 block.values.extend(values);
@@ -1515,9 +1605,7 @@ impl Collection {
                 }
             }
         }
-        let mut ranked: Vec<_> = best.into_iter().map(|r| r.0).collect();
-        ranked.sort_unstable_by(|a, b| b.cmp(a));
-        self.load_results_in(txn, ranked.into_iter().map(|c| (c.0, c.1)).collect())
+        self.load_results_in(txn, ranker.ranked())
             .map(|rows| (rows, computations))
     }
 

@@ -743,8 +743,9 @@ impl Collection {
         let allowed = if ann {
             filter
                 .as_ref()
-                .map(|f| self.matching_ids_in(txn, f))
+                .map(|f| self.bounded_vector_ids_in(txn, f))
                 .transpose()?
+                .flatten()
         } else {
             None
         };
@@ -755,7 +756,7 @@ impl Collection {
                 next_offset: None,
             });
         }
-        let eligible = allowed.as_ref().map_or(count, |ids| ids.len().min(count));
+        let mut eligible = allowed.as_ref().map_or(count, |ids| ids.len().min(count));
         let mut rows;
         if ann {
             let h = h.as_ref().unwrap();
@@ -775,26 +776,50 @@ impl Collection {
             // The unique table identity pins the loan to this graph generation;
             // revision additionally pins it to the vectors in this snapshot.
             let mut lease = graph::CacheLease::take(self.node_cache(), &h.table, h.revision);
+            let mask = if filter.is_some() && allowed.is_none() {
+                match graph::filter_mask(txn, h, &mut lease, |accept| {
+                    self.visit_vector_ids_in(txn, filter.as_ref().unwrap(), accept)
+                }) {
+                    Ok(mask) => {
+                        eligible = mask.count;
+                        Some(mask)
+                    }
+                    Err(TalaDbError::SearchMemoryLimit) => {
+                        drop(lease);
+                        return self
+                            .exact_memory_fallback_in(txn, field, query, top_k, filter, options);
+                    }
+                    Err(error) => return Err(error),
+                }
+            } else {
+                None
+            };
+            if eligible == 0 {
+                return Ok(VectorQueryResult {
+                    hits: vec![],
+                    execution,
+                    next_offset: None,
+                });
+            }
+            let eligibility = if let Some(mask) = &mask {
+                graph::Eligibility::Mask(&mask.bits)
+            } else if let Some(ids) = &allowed {
+                graph::Eligibility::Ids(ids)
+            } else {
+                graph::Eligibility::All
+            };
             loop {
                 let (ids, distances) =
-                    match graph::search(txn, h, query, ef, allowed.as_ref(), lease.cache_mut()) {
+                    match graph::search(txn, h, query, ef, eligibility, lease.cache_mut()) {
                         Ok(result) => result,
                         Err(TalaDbError::SearchMemoryLimit) => {
-                            // Release all traversal allocations before the fallback.
+                            // The query-owned bitmap is charged to this loan.
+                            drop(mask);
                             drop(lease);
                             drop(allowed);
-                            let mut exact_options = options.clone();
-                            exact_options.mode = VectorSearchMode::Exact;
-                            let mut result = self.search_vectors_in(
-                                txn,
-                                field,
-                                query,
-                                top_k,
-                                filter,
-                                &exact_options,
-                            )?;
-                            result.execution.reason = "memoryBudget".into();
-                            return Ok(result);
+                            return self.exact_memory_fallback_in(
+                                txn, field, query, top_k, filter, options,
+                            );
                         }
                         Err(error) => return Err(error),
                     };
@@ -802,7 +827,10 @@ impl Collection {
                 execution.ef_search = Some(ef);
                 // Exact rescoring always reads the original f32 vector from the
                 // same snapshot as the graph, filter, and returned document.
-                let mut ranked = Vec::with_capacity(ids.len());
+                let mut ranked = Vec::new();
+                let mut grouped = options.group_by.as_ref().map(|_| {
+                    vector_window::Ranker::new(wanted.saturating_add(1).min(count), options)
+                });
                 let query_norm = crate::vector::l2_norm(query);
                 for id in ids {
                     if let Some(bytes) = txn.get(&table, &id)?
@@ -816,11 +844,19 @@ impl Collection {
                             &v,
                         );
                         if score.is_finite() {
-                            ranked.push((Ulid::from_bytes(id), score));
+                            if let Some(window) = &mut grouped {
+                                window.offer(self, txn, Ulid::from_bytes(id), score)?;
+                            } else {
+                                ranked.push((Ulid::from_bytes(id), score));
+                            }
                         }
                     }
                 }
-                ranked.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+                if let Some(window) = grouped {
+                    ranked = window.ranked();
+                } else {
+                    ranked.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+                }
                 if let Some(threshold) = options.score_threshold {
                     ranked.retain(|r| r.1 >= threshold);
                 }
@@ -836,15 +872,11 @@ impl Collection {
                 ef = ef.saturating_mul(2).min(count);
             }
         } else {
-            // Grouping must see all candidates before truncation: simply
-            // grouping a top-k list loses less frequent parent entities.
-            let pool = if options.group_by.is_some() {
-                count
-            } else {
-                wanted.saturating_add(1).min(count)
-            };
+            // Quotas are applied while scoring. Only the page window is kept,
+            // rather than sorting and loading all documents before grouping.
+            let pool = wanted.saturating_add(1).min(count);
             (rows, execution.distance_computations) =
-                self.find_nearest_in(txn, field, query, pool, filter)?;
+                self.find_nearest_in(txn, field, query, pool, filter, options)?;
             Self::reduce_vector_rows(&mut rows, options)?;
         }
         let next_offset = (rows.len() > wanted).then_some(options.offset.saturating_add(top_k));
@@ -854,6 +886,22 @@ impl Collection {
             execution,
             next_offset,
         })
+    }
+    fn exact_memory_fallback_in(
+        &self,
+        txn: &dyn ReadTxn,
+        field: &str,
+        query: &[f32],
+        top_k: usize,
+        filter: Option<Filter>,
+        options: &VectorQueryOptions,
+    ) -> Result<VectorQueryResult, TalaDbError> {
+        let mut exact_options = options.clone();
+        exact_options.mode = VectorSearchMode::Exact;
+        let mut result =
+            self.search_vectors_in(txn, field, query, top_k, filter, &exact_options)?;
+        result.execution.reason = "memoryBudget".into();
+        Ok(result)
     }
     fn reduce_vector_rows(
         rows: &mut Vec<VectorSearchResult>,

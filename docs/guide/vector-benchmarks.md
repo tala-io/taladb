@@ -29,11 +29,12 @@ node scripts/bench-web.mjs --vectors --count 5000 --dims 384 \
 ```
 
 Results include build time and batch-step p50/p95 for 32-vector steps. For
-unfiltered queries, a 10% tenant filter, a 1% bucket filter, a skewed AND
-intersection, a 1% scalar window, and an array comparison combined with the
-bucket filter, each at `efSearch` 64, 100 and 200, the suite records:
+unfiltered queries, a 95% dense filter, dense grouped pagination, one group per
+document, a 10% tenant filter, a 1% bucket filter, a skewed AND intersection, a
+1% scalar window, and an array comparison combined with the bucket filter,
+the suite records exact mode and ANN at `efSearch` 64, 100 and 200:
 
-- Worker/database reopen time and the first ANN query after reopening.
+- Worker/database reopen time and the first query after reopening.
 - Warm query p50/p95, distance computations, and recall against exact results
   from the same query and filter.
 - Queued bursts of four concurrent UI requests, including queue latency p50/p95
@@ -52,8 +53,10 @@ The AND case combines the 10% tenant branch with the 1% bucket branch. The
 scalar window constrains indexed ordinals from both sides. The array case
 requires separate elements to satisfy contradictory scalar bounds; it catches
 incorrect range narrowing while measuring a multi-index filter. Exact ground
-truth uses the same filter, and result fingerprints can be compared across
-checkouts.
+truth uses the same filter and group/pagination options, and result fingerprints
+can be compared across checkouts. Grouped cases check quotas and unique results.
+The dense case exceeds the capped ID-set path at the default collection size;
+the one-group-per-document case exercises bounded group retention.
 
 The first query starts with a fresh worker and decoded-node cache. OS and
 storage caches can remain warm. OPFS is required: an IndexedDB fallback fails
@@ -112,9 +115,10 @@ cargo run --release -p taladb --example vector_memory_profile -- \
 
 Repeat with `--cache-bytes 8388608`. The CI native jobs run both budgets and
 publish `vector-memory-*.json`. These core runs exercise native concurrency;
-they do not substitute for Kotlin/Swift device benchmarks. Filter ID sets,
-result pools, record decoding, build scratch and storage-engine memory are
-outside the reported search allowance. Budget limits can switch ANN to exact,
+they do not substitute for Kotlin/Swift device benchmarks. Large-filter ANN
+bitmaps count toward the graph reservation. Capped filter ID sets, page windows,
+group keys, record decoding, build scratch and storage-engine memory are outside
+the reported search allowance. Budget limits can switch ANN to exact,
 so compare latency together with fallback counts and recall.
 
 CI compares baseline and candidate builds on the same runner. Chromium runs

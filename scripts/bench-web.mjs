@@ -136,9 +136,9 @@ async function main() {
     console.log(`\nTalaDB browser bench · ${ua} · ${serve ? 'manual browser/device' : `Chrome ${chromeVer} (headless) · ${cpu} · ${platform()} ${arch()}`}\n`)
     if (vectors) {
       console.log(`${report.config.count} vectors × ${report.config.dimensions} dimensions · ${report.config.cacheBytes} cache bytes · ${report.capabilities.storage}`)
-      console.log('| Filter | efSearch | First query ms | Warm p50/p95 ms | Recall@k |')
+      console.log('| Filter / mode | efSearch | First query ms | Warm p50/p95 ms | Recall@k |')
       console.log('|---|---:|---:|---:|---:|')
-      for (const row of report.cases) console.log(`| ${row.filter} | ${row.efSearch} | ${row.firstQueryMs.toFixed(3)} | ${row.p50Ms.toFixed(3)}/${row.p95Ms.toFixed(3)} | ${(row.recallAtK * 100).toFixed(1)}% |`)
+      for (const row of report.cases) console.log(`| ${row.filter} / ${row.mode} | ${row.efSearch} | ${row.firstQueryMs.toFixed(3)} | ${row.p50Ms.toFixed(3)}/${row.p95Ms.toFixed(3)} | ${(row.recallAtK * 100).toFixed(1)}% |`)
     } else {
       console.log(`OPFS ${opfs ? 'active' : 'UNAVAILABLE (in-memory fallback!)'}`)
       for (const r of rows) {

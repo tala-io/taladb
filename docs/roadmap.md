@@ -45,9 +45,6 @@ JavaScript runtime.
 - **Better approximate-search recall at scale** — improve candidate selection
   and graph connectivity, validated against exact search on larger collections
   and representative embedding datasets.
-- **Streaming filtered and grouped search** — reduce memory used by large
-  filter ID sets and grouped result pools, beyond the shared decoded-cache and
-  ANN traversal allowance.
 - **Adaptive cache sizing** — adapt the shared, configurable vector/graph
   budget to platform memory-pressure signals.
 - **Wider native SIMD** — a runtime-detected AVX2/NEON kernel on top of the

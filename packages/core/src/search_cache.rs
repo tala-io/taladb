@@ -14,8 +14,9 @@ pub(crate) const DEFAULT_SEARCH_CACHE_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const DEFAULT_SEARCH_CACHE_BYTES: usize = 64 * 1024 * 1024;
 
 /// Estimated decoded search allocations. Reservations conservatively charge the
-/// full allowance of active graph loans and vector-block construction. Storage,
-/// filters, result documents and build scratch are outside these estimates.
+/// full allowance of active graph loans (including large-filter bitmaps) and
+/// vector-block construction. Capped filter ID sets, page windows/group keys,
+/// result documents, storage and build scratch are outside these estimates.
 #[derive(Debug, Clone, Copy, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VectorCacheStats {

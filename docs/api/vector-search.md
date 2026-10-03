@@ -145,11 +145,13 @@ AND filters use bounded previews of up to 64 keys per indexed branch to choose a
 
 Multiple comparisons on a field share narrower scans only when transactional index metadata confirms that the field has no array-valued documents. Array fields keep independent comparisons because different elements can satisfy each bound. Indexes created or rebuilt with this release have that metadata. Older indexes without it stay conservative; dropping and recreating an index enables scalar narrowing. Residual predicates still require document fields.
 
-Exact filtered searches batch vector lookups for sparse matches. Dense matches use a streaming vector scan or an existing decoded-vector cache. Filtered searches do not populate that cache. Filter keys, vectors and returned documents all come from the same read snapshot.
+Vector filter execution retains at most 256 IDs per intermediate branch or union. Larger matches stream from unique index keys when covered; array unions, residual predicates and other shapes stream document projections instead. Residual AND predicates retain an available unique index seed. Text predicates use bounded posting-list previews before projected document checks. Exact search reuses an existing decoded-vector block or reads bounded batches from that stream. Nearby IDs use short ordered scans; scattered IDs fall back to point reads after a bounded scan. Smaller filters keep the sparse point-read or dense scan/cache path. Filtered searches do not populate the full decoded-vector cache. Filter keys, vectors and returned documents all come from the same read snapshot.
+
+Large filtered ANN queries use a compact eligibility bitmap indexed by graph-node ordinal. The bitmap counts toward the active graph reservation, leaving less allowance for decoded nodes and traversal buffers. Graphs with many historical ordinals can need a larger bitmap; if it cannot fit, search falls back to exact with `execution.reason: 'memoryBudget'`.
 
 `efSearch` defaults to 100. The effective candidate count is at least `(offset + topK) * oversampling`; oversampling defaults to 4 and accepts 1–100. Grouped ANN expands the pool when necessary. Every returned ANN score is recomputed from the original f32 vector in the same read snapshot as the filter and document.
 
-Grouping retains the highest scoring `groupSize` hits per field value before pagination. Missing and null group values form one group. `scoreThreshold` uses the index metric's similarity score, inclusive. `offset` and `nextOffset` support pagination over live queries; writes between pages can change ordering. ANN pages are approximate and increasing the candidate pool may change earlier rankings; use exact mode when stable ranking on unchanged data matters.
+Grouping retains the highest scoring `groupSize` hits per field value before pagination. Ranking keeps at most `offset + topK + 1` candidates and their group keys, rather than retaining every group or loading every candidate's full document. Only top-level fields needed for grouping are decoded for competitive candidates; a nested group field retains its parent value. Full documents are loaded for the retained window. Large offsets still increase memory and work. Missing and null group values form one group. `scoreThreshold` uses the index metric's similarity score, inclusive. `offset` and `nextOffset` support pagination over live queries; writes between pages can change ordering. ANN pages are approximate and increasing the candidate pool may change earlier rankings; use exact mode when stable ranking on unchanged data matters.
 
 The existing `findNearest` accepts these controls as an optional fifth argument and still returns a hit array. To retrieve every result meeting a threshold, use exact range search:
 
@@ -233,7 +235,8 @@ Rust cache statistics, also available through the binding command
 `memoryBudgetBytes` and `peakBytes` in JSON. Active and peak bytes conservatively
 charge the full reservation of a graph loan or vector-cache builder. They are
 accounting estimates, not measured heap use or RSS. Peak resets when the budget
-is set. Filter ID sets, ranked results and documents, transient single-record
+is set. Large-filter ANN bitmaps count toward the graph reservation. Capped
+filter ID sets, page windows and group keys, result documents, transient record
 decoding, rebuild scratch and storage-engine caches use additional memory.
 Device memory is not automatically detected; provide an application budget
 when the default is too large or too small.

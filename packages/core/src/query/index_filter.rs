@@ -13,6 +13,19 @@ use crate::index::{
     index_array_count, index_table_name, meta_key,
 };
 
+// Kept private to filter execution: a capped collection requests streaming,
+// while a real storage/decoding error must still reach the caller.
+pub(super) enum ResolveError {
+    Limit,
+    Database(TalaDbError),
+}
+impl From<TalaDbError> for ResolveError {
+    fn from(error: TalaDbError) -> Self {
+        Self::Database(error)
+    }
+}
+type ResolveResult<T> = Result<T, ResolveError>;
+
 pub(super) struct Candidates {
     pub ids: HashSet<[u8; 16]>,
     pub exact: bool,
@@ -24,19 +37,25 @@ pub(super) fn resolve(
     compounds: &[CompoundIndexDef],
     txn: &dyn ReadTxn,
     collection: &str,
-) -> Result<Option<Candidates>, TalaDbError> {
+    limit: usize,
+) -> ResolveResult<Option<Candidates>> {
     match filter {
-        Filter::And(children) => resolve_and(children, indexes, compounds, txn, collection),
+        Filter::And(children) => resolve_and(children, indexes, compounds, txn, collection, limit),
         Filter::Or(children) => {
             let mut result = Candidates {
                 ids: HashSet::new(),
                 exact: true,
             };
             for child in children {
-                let Some(next) = resolve(child, indexes, compounds, txn, collection)? else {
+                let Some(next) = resolve(child, indexes, compounds, txn, collection, limit)? else {
                     return Ok(None);
                 };
-                result.ids.extend(next.ids);
+                for id in next.ids {
+                    if result.ids.len() >= limit && !result.ids.contains(&id) {
+                        return Err(ResolveError::Limit);
+                    }
+                    result.ids.insert(id);
+                }
                 result.exact &= next.exact;
             }
             Ok(Some(result))
@@ -50,7 +69,13 @@ pub(super) fn resolve(
         {
             let plan = plan_full(filter, indexes, &[], &[]);
             let mut ids = HashSet::new();
-            scan_plan(&plan, &[filter], txn, collection, &mut Scan::all(&mut ids))?;
+            scan_plan(
+                &plan,
+                &[filter],
+                txn,
+                collection,
+                &mut Scan::all(&mut ids, limit),
+            )?;
             Ok(Some(Candidates { ids, exact: true }))
         }
         Filter::In(field, values)
@@ -61,7 +86,13 @@ pub(super) fn resolve(
             let mut ids = HashSet::new();
             if !values.is_empty() {
                 let plan = plan_full(filter, indexes, &[], &[]);
-                scan_plan(&plan, &[filter], txn, collection, &mut Scan::all(&mut ids))?;
+                scan_plan(
+                    &plan,
+                    &[filter],
+                    txn,
+                    collection,
+                    &mut Scan::all(&mut ids, limit),
+                )?;
             }
             Ok(Some(Candidates { ids, exact: true }))
         }
@@ -108,7 +139,8 @@ fn resolve_and(
     compounds: &[CompoundIndexDef],
     txn: &dyn ReadTxn,
     collection: &str,
-) -> Result<Option<Candidates>, TalaDbError> {
+    limit: usize,
+) -> ResolveResult<Option<Candidates>> {
     let mut branches = Vec::new();
     let mut covered = vec![false; children.len()];
     if !compounds.is_empty() {
@@ -187,7 +219,7 @@ fn resolve_and(
             &branch.predicates,
             txn,
             collection,
-            &mut Scan::all(&mut ids),
+            &mut Scan::all(&mut ids, limit),
         )?;
         result = Some(Candidates { ids, exact: true });
     } else if !branches.is_empty() {
@@ -199,6 +231,7 @@ fn resolve_and(
                 allowed: None,
                 remaining: Some(PREVIEW_KEYS),
                 seen: 0,
+                limit,
             };
             scan_plan(&branch.plan, &branch.predicates, txn, collection, &mut scan)?;
             let complete = scan.seen < PREVIEW_KEYS;
@@ -220,7 +253,7 @@ fn resolve_and(
                 &branches[first].predicates,
                 txn,
                 collection,
-                &mut Scan::all(&mut ids),
+                &mut Scan::all(&mut ids, limit),
             )?;
         }
         for (i, branch) in branches.iter().enumerate() {
@@ -251,6 +284,7 @@ fn resolve_and(
                         allowed: Some(&ids),
                         remaining: None,
                         seen: 0,
+                        limit,
                     },
                 )?;
                 ids = next;
@@ -266,7 +300,16 @@ fn resolve_and(
         if result.as_ref().is_some_and(|r| r.ids.is_empty()) {
             break;
         }
-        if let Some(next) = resolve(child, indexes, compounds, txn, collection)? {
+        let next = match resolve(child, indexes, compounds, txn, collection, limit) {
+            // A broad nested branch must not discard a small seed already
+            // selected by this AND. Check the remaining predicate on that seed.
+            Err(ResolveError::Limit) if result.is_some() => {
+                exact = false;
+                continue;
+            }
+            other => other?,
+        };
+        if let Some(next) = next {
             exact &= next.exact;
             if let Some(current) = &mut result {
                 intersect(&mut current.ids, next.ids);
@@ -447,7 +490,7 @@ fn scan_plan(
     txn: &dyn ReadTxn,
     collection: &str,
     scan: &mut Scan<'_>,
-) -> Result<(), TalaDbError> {
+) -> ResolveResult<()> {
     if scan.remaining == Some(0) {
         return Ok(());
     }
@@ -502,9 +545,7 @@ fn scan_plan(
             }
             Ok(())
         }
-        _ => Err(TalaDbError::InvalidOperation(
-            "unsupported covered filter plan".into(),
-        )),
+        _ => Err(TalaDbError::InvalidOperation("unsupported covered filter plan".into()).into()),
     }
 }
 
@@ -513,14 +554,16 @@ struct Scan<'a> {
     allowed: Option<&'a HashSet<[u8; 16]>>,
     remaining: Option<usize>,
     seen: usize,
+    limit: usize,
 }
 impl<'a> Scan<'a> {
-    fn all(ids: &'a mut HashSet<[u8; 16]>) -> Self {
+    fn all(ids: &'a mut HashSet<[u8; 16]>, limit: usize) -> Self {
         Self {
             ids,
             allowed: None,
             remaining: None,
             seen: 0,
+            limit,
         }
     }
 }
@@ -560,15 +603,20 @@ fn scan_keys(
     predicates: &[&Filter],
     compound: bool,
     scan: &mut Scan<'_>,
-) -> Result<(), TalaDbError> {
+) -> ResolveResult<()> {
     if scan.remaining == Some(0) {
         return Ok(());
     }
+    let mut overflow = false;
     txn.scan(table, start, end, &mut |key, _| {
         let split = key.len().checked_sub(16).ok_or_else(malformed)?;
         let id = key[split..].try_into().map_err(|_| malformed())?;
         let matches = key_matches(&key[..split], predicates, compound)?;
         if matches && scan.allowed.is_none_or(|ids| ids.contains(&id)) {
+            if scan.ids.len() >= scan.limit && !scan.ids.contains(&id) {
+                overflow = true;
+                return Ok(ScanFlow::Stop);
+            }
             scan.ids.insert(id);
         }
         scan.seen += 1;
@@ -579,5 +627,168 @@ fn scan_keys(
             }
         }
         Ok(ScanFlow::Continue)
-    })
+    })?;
+    if overflow {
+        Err(ResolveError::Limit)
+    } else {
+        Ok(())
+    }
+}
+
+/// Visit a covered index plan only when each matching document is emitted once.
+/// Array equality on a single key is unique; range unions require scalar-only
+/// metadata. Other filter shapes stream document projections instead.
+pub(super) fn visit_unique(
+    filter: &Filter,
+    indexes: &[IndexDef],
+    compounds: &[CompoundIndexDef],
+    txn: &dyn ReadTxn,
+    collection: &str,
+    accept: &mut dyn FnMut([u8; 16]) -> Result<(), TalaDbError>,
+) -> Result<bool, TalaDbError> {
+    let (plan, predicates, table, compound) = match filter {
+        Filter::And(children) => {
+            let plan = plan_full(filter, indexes, &[], compounds);
+            if let QueryPlan::CompoundIndexEq { fields, .. } = &plan {
+                let predicates: Vec<_> = fields
+                    .iter()
+                    .filter_map(|field| {
+                        children
+                            .iter()
+                            .find(|p| matches!(p, Filter::Eq(f, _) if f == field))
+                    })
+                    .collect();
+                if !children.iter().all(|child| {
+                    matches!(child, Filter::All) || predicates.iter().any(|p|
+                    matches!((child, p), (Filter::Eq(a, x), Filter::Eq(b, y)) if a == b && x == y))
+                }) {
+                    return Ok(false);
+                }
+                let table = compound_table_name(
+                    collection,
+                    &fields.iter().map(String::as_str).collect::<Vec<_>>(),
+                );
+                (plan, predicates, table, true)
+            } else {
+                let predicates: Vec<_> = children
+                    .iter()
+                    .filter(|f| !matches!(f, Filter::All))
+                    .collect();
+                let Some(field) = predicates.first().and_then(|f| leaf_field(f)) else {
+                    return Ok(false);
+                };
+                if !indexes.iter().any(|i| i.field == field)
+                    || !predicates
+                        .iter()
+                        .all(|p| comparison(p) && leaf_field(p) == Some(field))
+                    || !scalar_field(txn, collection, field)?
+                {
+                    return Ok(false);
+                }
+                let mut plan = plan_full(predicates[0], indexes, &[], &[]);
+                for p in &predicates[1..] {
+                    plan = intersect_ranges(&plan, &plan_full(p, indexes, &[], &[]), field);
+                }
+                (plan, predicates, index_table_name(collection, field), false)
+            }
+        }
+        _ => {
+            let Some(field) = leaf_field(filter) else {
+                return Ok(false);
+            };
+            if !indexes.iter().any(|i| i.field == field) {
+                return Ok(false);
+            }
+            let plan = if matches!(filter, Filter::In(_, v) if v.is_empty()) {
+                QueryPlan::IndexOr { plans: vec![] }
+            } else {
+                plan_full(filter, indexes, &[], &[])
+            };
+            if !matches!(plan, QueryPlan::IndexEq { .. }) && !scalar_field(txn, collection, field)?
+            {
+                return Ok(false);
+            }
+            (
+                plan,
+                vec![filter],
+                index_table_name(collection, field),
+                false,
+            )
+        }
+    };
+    let intervals = if let QueryPlan::CompoundIndexEq { start, end, .. } = &plan {
+        vec![(Bound::Included(start.clone()), Bound::Included(end.clone()))]
+    } else {
+        union_ranges(ranges(&plan))
+    };
+    for (start, end) in intervals {
+        txn.scan(
+            &table,
+            start.as_ref().map(Vec::as_slice),
+            end.as_ref().map(Vec::as_slice),
+            &mut |key, _| {
+                let split = key.len().checked_sub(16).ok_or_else(malformed)?;
+                if key_matches(&key[..split], &predicates, compound)? {
+                    accept(key[split..].try_into().map_err(|_| malformed())?)?;
+                }
+                Ok(ScanFlow::Continue)
+            },
+        )?;
+    }
+    Ok(true)
+}
+
+fn scalar_field(txn: &dyn ReadTxn, collection: &str, field: &str) -> Result<bool, TalaDbError> {
+    Ok(txn
+        .get(
+            META_INDEX_ARRAYS_TABLE,
+            meta_key(collection, field).as_bytes(),
+        )?
+        .and_then(|b| index_array_count(&b))
+        == Some(0))
+}
+
+// Merge overlapping ranges (including duplicate $in entries) before visiting
+// scalar keys. A scalar document contributes one key, so no ID set is needed.
+fn union_ranges(mut ranges: Vec<KeyRange>) -> Vec<KeyRange> {
+    ranges.sort_by(|(a, _), (b, _)| match (a, b) {
+        (Bound::Unbounded, Bound::Unbounded) => std::cmp::Ordering::Equal,
+        (Bound::Unbounded, _) => std::cmp::Ordering::Less,
+        (_, Bound::Unbounded) => std::cmp::Ordering::Greater,
+        (Bound::Included(a), Bound::Excluded(b)) => a.cmp(b).then(std::cmp::Ordering::Less),
+        (Bound::Excluded(a), Bound::Included(b)) => a.cmp(b).then(std::cmp::Ordering::Greater),
+        (Bound::Included(a) | Bound::Excluded(a), Bound::Included(b) | Bound::Excluded(b)) => {
+            a.cmp(b)
+        }
+    });
+    let mut out: Vec<KeyRange> = Vec::new();
+    for (start, end) in ranges {
+        if let Some((_, previous_end)) = out.last_mut() {
+            let overlap = match (&*previous_end, &start) {
+                (Bound::Unbounded, _) | (_, Bound::Unbounded) => true,
+                (Bound::Included(a), Bound::Included(b)) => a >= b,
+                (
+                    Bound::Included(a) | Bound::Excluded(a),
+                    Bound::Included(b) | Bound::Excluded(b),
+                ) => a > b,
+            };
+            if overlap {
+                let extend = match (&*previous_end, &end) {
+                    (Bound::Unbounded, _) => false,
+                    (_, Bound::Unbounded) => true,
+                    (Bound::Excluded(a), Bound::Included(b)) => b >= a,
+                    (
+                        Bound::Included(a) | Bound::Excluded(a),
+                        Bound::Included(b) | Bound::Excluded(b),
+                    ) => b > a,
+                };
+                if extend {
+                    *previous_end = end;
+                }
+                continue;
+            }
+        }
+        out.push((start, end));
+    }
+    out
 }

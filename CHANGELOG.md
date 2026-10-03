@@ -3,6 +3,8 @@
 
 ## 0.12.0 — Unreleased
 
+- Stream large vector filters instead of retaining unbounded ID sets. Sparse filters retain the indexed path; dense ANN eligibility uses an ordinal bitmap charged to the shared graph allowance, with same-snapshot exact fallback when it cannot fit. Exact filtered searches batch streamed vector reads. Residual AND filters keep indexed candidate streams, and text filters use bounded posting previews instead of full collection scans. Grouped exact and ANN ranking keep only the requested page window and decode group fields for competitive candidates, preserving quotas, thresholds, ties and pagination. Browser/OPFS benchmarks now time exact mode, 95% filters, grouped pagination and collections with one group per document at phone-sized cache budgets.
+
 - Added cost-aware vector filter intersections: bounded index previews choose small candidate sets, broad equality and `$in` branches use batched point probes when cheaper, and scalar comparisons share narrower scans. Optional array counts are maintained with index writes and rebuilds; array-valued and legacy indexes retain independent comparison semantics. The browser/OPFS benchmark now covers skewed AND filters, narrow scalar windows and array bounds satisfied by different elements.
 
 - TalaDB for Rust: the engine is now the `taladb` crate, published to crates.io and usable as the local database of any Rust application.

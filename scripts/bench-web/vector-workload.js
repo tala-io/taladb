@@ -32,7 +32,7 @@ export function dataset(config) {
   }
   const centers = Array.from({ length: 32 }, () => normalize(Array.from({ length: config.dimensions }, () => random() * 2 - 1)))
   const point = i => normalize(centers[i % centers.length].map(x => x + (random() * 2 - 1) * 0.2))
-  const documents = Array.from({ length: config.count }, (_, i) => ({ ordinal: i, tenant: i % 10, bucket: i % 100, tags: [i, i + config.count], v: point(i) }))
+  const documents = Array.from({ length: config.count }, (_, i) => ({ ordinal: i, tenant: i % 10, bucket: i % 100, active: i % 20 !== 19, tags: [i, i + config.count], v: point(i) }))
   seed = config.seed ^ 0x12345
   return {
     documents,
@@ -84,10 +84,13 @@ export async function runVectorBenchmark(config, {
       if (globalThis.navigator?.locks?.request) await navigator.locks.request(`taladb:taladb_${dbName}.redb`, () => {})
     }
   }
-  const search = (query, filter, mode, efSearch) => command({ op: 'search', field: 'v', query, topK: config.topK, filter, options: { mode, efSearch } })
+  const search = (query, filter, mode, efSearch) => command({ op: 'search', field: 'v', query, topK: config.topK, filter: filter.value, options: { ...filter.options, mode, efSearch } })
   const windowStart = Math.floor(config.count / 2)
   const filters = [
     { name: 'all', value: null },
+    { name: 'dense-95pct', value: { active: true } },
+    { name: 'dense-grouped', value: { active: true }, options: { groupBy: 'tenant', groupSize: 2, offset: 2 } },
+    { name: 'many-groups', value: null, options: { groupBy: 'ordinal', groupSize: 1 } },
     { name: 'tenant-10pct', value: { tenant: 0 } },
     { name: 'bucket-1pct', value: { bucket: 0 } },
     { name: 'and-skew-1pct', value: { $and: [{ tenant: 0 }, { bucket: 0 }] } },
@@ -115,7 +118,7 @@ export async function runVectorBenchmark(config, {
     for (let i = 0; i < documents.length; i += 128) {
       await client.call('insertMany', { collection: 'vectors', docsJson: JSON.stringify(documents.slice(i, i + 128)) })
     }
-    for (const field of ['tenant', 'bucket', 'ordinal', 'tags']) await client.call('createIndex', { collection: 'vectors', field })
+    for (const field of ['tenant', 'bucket', 'ordinal', 'tags', 'active']) await client.call('createIndex', { collection: 'vectors', field })
     const insertMs = now() - insertStart
     const buildStart = now()
     await command({ op: 'create', field: 'v', dimensions: config.dimensions, options: { m: config.m, efConstruction: config.efConstruction, quantization: config.quantization }, deferBuild: true })
@@ -136,34 +139,57 @@ export async function runVectorBenchmark(config, {
     for (const filter of filters) {
       progress(`ground truth: ${filter.name}`)
       const truth = []
-      const expectedCount = Math.min(config.topK, documents.filter(doc => matches(doc, filter.value)).length)
+      const validate = hits => {
+        const counts = new Map(), ordinals = new Set()
+        for (const hit of hits) {
+          const doc = hit.document
+          if (!matches(doc, filter.value) || ordinals.has(doc.ordinal)) throw new Error(`filter eligibility or duplicate result: ${filter.name}`)
+          ordinals.add(doc.ordinal)
+          if (filter.options?.groupBy) {
+            const key = doc[filter.options.groupBy], count = (counts.get(key) ?? 0) + 1
+            counts.set(key, count)
+            if (count > filter.options.groupSize) throw new Error(`group quota mismatch: ${filter.name}`)
+          }
+        }
+      }
+      const eligible = documents.filter(doc => matches(doc, filter.value))
+      const groups = new Map()
+      for (const doc of eligible) {
+        const key = doc[filter.options?.groupBy]
+        groups.set(key, (groups.get(key) ?? 0) + 1)
+      }
+      const available = filter.options?.groupBy
+        ? [...groups.values()].reduce((sum, count) => sum + Math.min(count, filter.options.groupSize), 0)
+        : eligible.length
+      const expectedCount = Math.min(config.topK, Math.max(0, available - (filter.options?.offset ?? 0)))
       for (const query of probes) {
-        const hits = (await search(query, filter.value, 'exact', 100)).hits
-        if (hits.length !== expectedCount || hits.some(hit => !matches(hit.document, filter.value))) {
+        const hits = (await search(query, filter, 'exact', 100)).hits
+        validate(hits)
+        if (hits.length !== expectedCount) {
           throw new Error(`exact filter eligibility mismatch: ${filter.name}`)
         }
         truth.push(hits)
       }
-      for (const efSearch of [64, 100, 200]) {
+      for (const [mode, efSearch] of [['exact', 100], ['ann', 64], ['ann', 100], ['ann', 200]]) {
         await close()
         const reopenStart = now()
         await open()
         const reopenMs = now() - reopenStart
         const firstStart = now()
-        const first = await search(probes[0], filter.value, 'ann', efSearch)
+        const first = await search(probes[0], filter, mode, efSearch)
         const firstQueryMs = now() - firstStart
-        if (first.execution.path !== 'hnsw' && first.execution.reason !== 'memoryBudget') throw new Error('ANN was not used')
+        if (mode === 'ann' && first.execution.path !== 'hnsw' && first.execution.reason !== 'memoryBudget') throw new Error('ANN was not used')
         // Warm the fixed query sweep before measuring it.
-        for (const query of probes) await search(query, filter.value, 'ann', efSearch)
+        for (const query of probes) await search(query, filter, mode, efSearch)
         const times = []
         let recall = 0, distances = 0, fingerprint = 2166136261, memoryFallbacks = 0
         for (let i = 0; i < probes.length; i++) {
           const start = now()
-          const result = await search(probes[i], filter.value, 'ann', efSearch)
+          const result = await search(probes[i], filter, mode, efSearch)
           times.push(now() - start)
-          if (result.hits.some(hit => !matches(hit.document, filter.value))) throw new Error(`ANN filter eligibility mismatch: ${filter.name}`)
+          validate(result.hits)
           if (result.execution.reason === 'memoryBudget') memoryFallbacks++
-          else if (result.execution.path !== 'hnsw') throw new Error('ANN was not used')
+          else if (mode === 'ann' && result.execution.path !== 'hnsw') throw new Error('ANN was not used')
           distances += result.execution.distanceComputations
           const ids = new Set(truth[i].map(hit => hit.document.ordinal))
           recall += ids.size ? result.hits.filter(hit => ids.has(hit.document.ordinal)).length / ids.size : 1
@@ -179,24 +205,24 @@ export async function runVectorBenchmark(config, {
         for (let i = 0; i < probes.length; i++) {
           await Promise.all(Array.from({ length: config.concurrency }, async (_, j) => {
             const start = now()
-            const result = await search(probes[(i + j) % probes.length], filter.value, 'ann', efSearch)
+            const result = await search(probes[(i + j) % probes.length], filter, mode, efSearch)
             burstTimes.push(now() - start)
             if (result.execution.reason === 'memoryBudget') burstFallbacks++
-            else if (result.execution.path !== 'hnsw') throw new Error('ANN was not used')
+            else if (mode === 'ann' && result.execution.path !== 'hnsw') throw new Error('ANN was not used')
           }))
         }
         const stats = await cacheStats()
         if (stats && (stats.activeBytes !== 0 || stats.retainedBytes > stats.budgetBytes || stats.peakBytes > stats.memoryBudgetBytes)) {
           throw new Error('shared search memory accounting exceeded budget or leaked a reservation')
         }
-        cases.push({ filter: filter.name, efSearch, reopenMs, firstQueryMs, ...percentiles(times), recallAtK: recall / probes.length, distances, fingerprint,
+        cases.push({ filter: filter.name, mode, efSearch, reopenMs, firstQueryMs, ...percentiles(times), recallAtK: recall / probes.length, distances, fingerprint,
           firstMemoryFallback: first.execution.reason === 'memoryBudget', memoryFallbacks, cacheStats: stats,
           burst: { concurrency: config.concurrency, requests: burstTimes.length, ...percentiles(burstTimes), memoryFallbacks: burstFallbacks } })
-        progress(`${filter.name} ef=${efSearch}: ${cases.at(-1).p50Ms.toFixed(2)} ms`)
+        progress(`${filter.name} ${mode} ef=${efSearch}: ${cases.at(-1).p50Ms.toFixed(2)} ms`)
       }
     }
     const originMemoryAfterBytes = await memory()
-    return { schema: 1, workload: 'browser-vector', config, capabilities, insertMs, buildMs,
+    return { schema: 2, workload: 'browser-vector', config, capabilities, insertMs, buildMs,
       buildStep: { ...percentiles(steps), count: steps.length }, cases,
       originMemoryBeforeBytes, originMemoryAfterBytes }
   } finally {

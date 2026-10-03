@@ -46,7 +46,16 @@ function fake(storage = 'opfs', fail = false, { fallback = false, noStats = fals
         })
         return doc[field] === value
       })
-      const matching = documents.filter(doc => matches(doc, request.filter))
+      let matching = documents.filter(doc => matches(doc, request.filter))
+      if (request.options.groupBy) {
+        const counts = new Map()
+        matching = matching.filter(doc => {
+          const key = doc[request.options.groupBy], count = counts.get(key) ?? 0
+          counts.set(key, count + 1)
+          return count < request.options.groupSize
+        })
+      }
+      matching = matching.slice(request.options.offset ?? 0)
       return { hits: matching.slice(0, request.topK).map(document => ({ document, score: 1 / (document.ordinal + 1) })),
         execution: { path: request.options.mode === 'ann' && !fallback ? 'hnsw' : 'exact', reason: request.options.mode === 'ann' && fallback ? 'memoryBudget' : 'indexReady', distanceComputations: matching.length } }
     }
@@ -59,14 +68,16 @@ test('worker workload uses configured cache, staged builds, persisted reopen and
   let time = 0
   const config = settings('count=100&dims=8&queries=3')
   const result = await runVectorBenchmark(config, { Client: f.Client, now: () => time++, memory: async () => 123 })
-  assert.equal(result.cases.length, 18)
+  assert.equal(result.cases.length, 36)
   assert.ok(result.cases.every(row => row.recallAtK === 1 && row.firstQueryMs > 0))
+  assert.equal(result.cases.filter(row => row.mode === 'exact').length, 9)
+  assert.ok(f.calls.some(c => c.op === 'vectorCommand' && JSON.parse(c.args.requestJson).options?.groupBy === 'tenant' && JSON.parse(c.args.requestJson).options?.offset === 2))
   assert.equal(result.buildStep.count, 4)
   assert.ok(result.cases.every(row => row.burst.requests === config.queries * config.concurrency && row.cacheStats.activeBytes === 0))
   assert.equal(result.originMemoryAfterBytes, 123)
-  assert.deepEqual(f.stats(), { opens: 19, closes: 19, terminated: 19 })
+  assert.deepEqual(f.stats(), { opens: 37, closes: 37, terminated: 37 })
   for (const name of ['and-skew-1pct', 'scalar-window-1pct', 'array-cross-1pct']) {
-    assert.equal(result.cases.filter(row => row.filter === name).length, 3)
+    assert.equal(result.cases.filter(row => row.filter === name).length, 4)
   }
   assert.ok(f.calls.filter(c => c.op === 'init').every(c => JSON.parse(c.args.configJson).vector_cache_bytes === config.cacheBytes))
   const builds = f.calls.filter(c => c.op === 'vectorCommand').map(c => JSON.parse(c.args.requestJson)).filter(c => c.op === 'stepBuild')
@@ -115,7 +126,7 @@ test('browser reports exact memory fallbacks and supports baseline bindings with
   const f = fake('opfs', false, { fallback: true, noStats: true })
   const config = settings('count=100&dims=8&queries=2&concurrency=3')
   const result = await runVectorBenchmark(config, { Client: f.Client, memory: async () => null })
-  assert.ok(result.cases.every(row => row.firstMemoryFallback && row.memoryFallbacks === 2 && row.burst.memoryFallbacks === 6 && row.cacheStats === null))
+  assert.ok(result.cases.filter(row => row.mode === 'ann').every(row => row.firstMemoryFallback && row.memoryFallbacks === 2 && row.burst.memoryFallbacks === 6 && row.cacheStats === null))
 })
 
 test('browser rejects leaked search reservations and releases its worker', async () => {
