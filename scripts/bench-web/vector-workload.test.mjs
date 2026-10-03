@@ -166,14 +166,16 @@ test('baselines that predate a correctness fix are recorded and skipped, candida
   const config = settings('count=100&dims=8&queries=2')
   await assert.rejects(runVectorBenchmark(config, { Client: fake('opfs', false, { scalarArrays: true }).Client, memory: async () => null }), IncorrectResult)
   const f = fake('opfs', false, { scalarArrays: true })
-  const before = await runVectorBenchmark(config, { Client: f.Client, memory: async () => null, baseline: true })
+  // Step clocks keep the latency gate out of this test; real timings vary by runner.
+  const clock = () => { let time = 0; return () => time++ }
+  const before = await runVectorBenchmark(config, { Client: f.Client, now: clock(), memory: async () => null, baseline: true })
   assert.equal(f.stats().opens, f.stats().terminated)
   const wrong = before.cases.filter(row => row.incorrect)
   assert.deepEqual(wrong.map(row => [row.filter, row.mode, row.efSearch]),
     [['array-cross-1pct', 'exact', 100], ['array-cross-1pct', 'ann', 64], ['array-cross-1pct', 'ann', 100], ['array-cross-1pct', 'ann', 200]])
   assert.match(wrong[0].incorrect, /exact filter eligibility mismatch/)
   assert.equal(before.cases.length, 36)
-  const after = await runVectorBenchmark(config, { Client: fake().Client, memory: async () => null })
+  const after = await runVectorBenchmark(config, { Client: fake().Client, now: clock(), memory: async () => null })
   for (const report of [before, after]) report.ua = 'test browser'
   const a = aggregate([before, before]), b = aggregate([after, after])
   assert.deepEqual(compare(a, b), [])
